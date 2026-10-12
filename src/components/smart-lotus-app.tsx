@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Icon, type IconName, LotusLogo, LotusMascot } from "./icons";
 import { curriculum, difficultyMeta, questions, type QuizQuestion, type SurveyQuestion } from "@/lib/learning-data";
-import { adminMetrics, teacherStudents } from "@/lib/role-data";
+import { adminMetrics } from "@/lib/role-data";
 import { calculateQuestionScore, calculateQuizScore, formatDuration } from "@/lib/scoring";
 import { smartLotusApi, type AttemptPayload, type DashboardData, type Role } from "@/lib/api";
 import { supabase } from "@/lib/supabase";
@@ -12,9 +12,11 @@ import {
   buildSelectOptions,
   evalTokens,
   MatchBoard,
+  ImageChoiceAnswers,
   MODE_LABELS,
   NumberLineInput,
   SelectAllOptions,
+  shuffle,
   TileEquation,
   TypeInput,
   type AnswerMode,
@@ -22,12 +24,18 @@ import {
 import { QuizIllustration } from "./quiz-illustrations";
 import { difficultiesForScore, evaluatePathLocal, type AttemptSummary, type PathEvaluation, type PlacementResult } from "@/lib/placement";
 import MathLevelMap from "./game-level-map";
+import Classroom from "./classroom";
+import AssignmentBuilder from "./assignment-builder";
+import TeacherOverview from "./teacher-overview";
 import PlacementSurvey from "./placement-survey";
+import StudentClassrooms from "./student-classrooms";
+import type { Assignment } from "@/lib/assignment-data";
 
-type StudentView = "home" | "exercises" | "roadmap" | "compete" | "achievements";
+type StudentView = "home" | "classrooms" | "exercises" | "roadmap" | "compete" | "achievements";
+type TeacherView = "overview" | "classes" | "assignments";
 type Screen = "app" | "quiz" | "result" | "survey" | "guide";
 type AuthMode = "login" | "register";
-type QuizMode = "journey" | "review" | "demo";
+type QuizMode = "journey" | "review" | "demo" | "assignment";
 type AttemptMode = "normal" | "retry" | "hard";
 
 const MAP_CHAPTER_SIZE = [17, 17, 17, 17, 16, 16];
@@ -42,6 +50,7 @@ function lessonForMapPad(lessonNumber: number) {
       chapter = i;
       break;
     }
+
     start += MAP_CHAPTER_SIZE[i];
   }
   const level = chapter + 1;
@@ -70,22 +79,25 @@ type QuizResult = {
 const fallbackDashboard: DashboardData = {
   user: {
     id: 0,
-    displayName: "Nguyễn Minh Anh",
-    email: "minhanh@smartlotus.edu.vn",
+    displayName: "Học sinh",
+    email: "",
     role: "student",
-    avatar: "MA",
-    lotusPoints: 1240,
-    currentStreak: 5,
+    avatar: "SL",
+    lotusPoints: 0,
+    currentStreak: 0,
   },
-  stats: { completedLessons: 14, totalLessons: 40, averageScore: 86, learningMinutes: 42 },
+  stats: { completedLessons: 0, totalLessons: 0, averageScore: 0, learningMinutes: 0 },
   recentAttempts: [],
-  todayActivity: { minutesLearned: 0, lessonsCompleted: 0, pointsEarned: 0, correctAnswers: 0 },
+  todayActivity: { minutesLearned: 0, lessonsCompleted: 0, pointsEarned: 0, correctAnswers: 0, attempts: 0, accuracySum: 0 },
   weeklyLeaderboard: [],
   lowScoreAttempts: 0,
+  placement: null,
+  attemptHistory: [],
 };
 
 const navItems: Array<{ id: StudentView; label: string; icon: IconName }> = [
   { id: "home", label: "Trang chủ", icon: "home" },
+  { id: "classrooms", label: "Lớp học", icon: "school" },
   { id: "exercises", label: "Bài tập", icon: "target" },
   { id: "roadmap", label: "Lộ trình", icon: "map" },
   { id: "compete", label: "Thi đấu", icon: "trophy" },
@@ -117,6 +129,79 @@ function isAllowedQuestion(question: QuizQuestion) {
   if (COUNTING_QUESTION_RE.test(question.prompt)) return false;
   if (question.illustration && question.illustration.trim()) return false;
   return true;
+}
+
+function questionPromptKey(prompt: string) {
+  return prompt.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+}
+
+function makeFreshFallbackQuestions(
+  bank: QuizQuestion[],
+  excludedPrompts: Set<string>,
+  count: number,
+  difficulties: Array<"A" | "B" | "C" | "D" | "E"> = ["A", "B", "C", "D", "E"],
+  curriculumLevel = 1,
+): QuizQuestion[] {
+  if (count <= 0) return [];
+
+  const candidates = shuffle(bank);
+  const selected: QuizQuestion[] = [];
+  const selectedPrompts = new Set(excludedPrompts);
+  const normalCount = Math.ceil(count / 2);
+  const allowedDifficulties: QuizQuestion["difficulty"][] = difficulties.length
+    ? difficulties
+    : ["A", "B", "C", "D", "E"];
+
+  for (const question of candidates) {
+    const key = questionPromptKey(question.prompt);
+    if (selectedPrompts.has(key)) continue;
+    selectedPrompts.add(key);
+    selected.push(question);
+    if (selected.length === count) break;
+  }
+
+  const maxValue = curriculumLevel <= 3 ? 10 : 100;
+  let attempt = 0;
+  while (selected.length < count && attempt < count * 100) {
+    attempt += 1;
+    const type = Math.floor(Math.random() * 4);
+    const first = 1 + Math.floor(Math.random() * maxValue);
+    const second = Math.floor(Math.random() * (maxValue - first + 1));
+    const answer = first + second;
+    const prompt =
+      type === 0
+        ? `${first} + ${second} = ?`
+        : type === 1
+          ? `${answer} − ${first} = ?`
+          : type === 2
+            ? `${first} + ☐ = ${answer}. Số cần điền là?`
+            : `☐ − ${second} = ${first}. Số ban đầu là?`;
+    const key = questionPromptKey(prompt);
+    if (selectedPrompts.has(key)) continue;
+
+    const correctAnswer = String(type === 1 || type === 2 ? second : answer);
+    const optionValues = new Set([correctAnswer]);
+    for (const offset of shuffle([1, 2, 3, 4])) {
+      const candidateAnswer = Number(correctAnswer) + (Math.random() < 0.5 ? -offset : offset);
+      if (candidateAnswer >= 0 && candidateAnswer <= maxValue * 2) optionValues.add(String(candidateAnswer));
+      if (optionValues.size === 4) break;
+    }
+    while (optionValues.size < 4) optionValues.add(String(Number(correctAnswer) + optionValues.size + 1));
+
+    selectedPrompts.add(key);
+    selected.push({
+      id: selected.length + 1,
+      phase: selected.length < normalCount ? "normal" : "challenge",
+      difficulty: allowedDifficulties[Math.floor(Math.random() * allowedDifficulties.length)],
+      skill: "Phép tính",
+      prompt,
+      options: shuffle([...optionValues]),
+      correctAnswer,
+      explanation: "",
+    });
+  }
+
+  return selected.map((question, index) => ({ ...question, id: index + 1 }));
 }
 
 /** Ngân hàng câu hỏi dự phòng đã lọc (chỉ câu không cần hình minh họa). */
@@ -193,15 +278,21 @@ export default function SmartLotusApp() {
   const [greetingName, setGreetingName] = useState("Minh Anh");
   const [authenticated, setAuthenticated] = useState(false);
   const [view, setView] = useState<StudentView>("home");
+  const [teacherView, setTeacherView] = useState<TeacherView>("overview");
   const [screen, setScreen] = useState<Screen>("app");
   const [dashboard, setDashboard] = useState<DashboardData>(fallbackDashboard);
   const [quizQuestions, setQuizQuestions] = useState<QuizQuestion[]>(questions);
+  const quizGenerationId = useRef(0);
+  const quizInteracted = useRef(false);
+  const quizLessonNumber = useRef<number | undefined>(undefined);
+  const seenQuizPrompts = useRef(new Set<string>());
   const [surveyQuestions, setSurveyQuestions] = useState<SurveyQuestion[] | null>(null);
   const [placement, setPlacement] = useState<PlacementResult | null>(null);
   const [evaluation, setEvaluation] = useState<PathEvaluation | null>(null);
   const [attemptHistory, setAttemptHistory] = useState<AttemptSummary[]>([]);
   const [initialIntel, setInitialIntel] = useState(50);
   const [quizMode, setQuizMode] = useState<QuizMode>("journey");
+  const [activeAssignment, setActiveAssignment] = useState<Assignment | null>(null);
   const [journeyFailed, setJourneyFailed] = useState(false);
   const [skipEligible, setSkipEligible] = useState(false);
   const [studyStreak, setStudyStreak] = useState(0);
@@ -221,6 +312,7 @@ export default function SmartLotusApp() {
   const [toast, setToast] = useState("");
   const [loading, setLoading] = useState(false);
   const [todayLabel, setTodayLabel] = useState("");
+  const knownClassroomInvitations = useRef(new Set<string>());
 
   useEffect(() => {
     const updateTodayLabel = () => setTodayLabel(formatTodayLabel(new Date()));
@@ -229,30 +321,56 @@ export default function SmartLotusApp() {
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (!authenticated || role !== "student") return;
+    let active = true;
+    knownClassroomInvitations.current = new Set();
+    const checkInvitations = async () => {
+      try {
+        const { invitations } = await smartLotusApi.getClassroomInvitations();
+        if (!active) return;
+        if (invitations.some((invitation) => !knownClassroomInvitations.current.has(invitation.id))) {
+          setToast("Bạn có lời mời vào lớp mới. Mở mục Lớp học để phản hồi.");
+        }
+        knownClassroomInvitations.current = new Set(invitations.map((invitation) => invitation.id));
+      } catch (error) {
+        console.error("Check classroom invitation notifications error", error);
+      }
+    };
+    void checkInvitations();
+    const timer = window.setInterval(() => void checkInvitations(), 20_000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [authenticated, role]);
+
   const loadDashboard = useCallback(async (nextRole: Role) => {
     setLoading(true);
-    const withStoredPoints = (data: DashboardData): DashboardData => {
-      try {
-        const saved = window.localStorage.getItem("smart-lotus-points");
-        if (saved !== null) return { ...data, user: { ...data.user, lotusPoints: Number(saved) || 0 } };
-      } catch {
-        /* bỏ qua */
-      }
-      return data;
-    };
     try {
       const data = await smartLotusApi.getDashboard(nextRole);
-      setDashboard(withStoredPoints(data));
+      setDashboard(data);
+      setPlacement(data.placement);
+      setAttemptHistory(data.attemptHistory);
+      setStudyStreak(data.user.currentStreak);
+      setTodayGoal({
+        date: todayKey(),
+        minutes: data.todayActivity.minutesLearned,
+        correctAnswers: data.todayActivity.correctAnswers,
+        points: data.todayActivity.pointsEarned,
+        attempts: data.todayActivity.attempts,
+        accuracySum: data.todayActivity.accuracySum,
+      });
+      if (data.placement) {
+        const nextEvaluation = evaluatePathLocal(data.placement, data.attemptHistory);
+        setEvaluation(nextEvaluation);
+        setInitialIntel(nextEvaluation.intelligenceScore);
+      } else {
+        setEvaluation(null);
+        setInitialIntel(50);
+      }
     } catch {
-      setDashboard((current) => ({
-        ...withStoredPoints(current),
-        user: {
-          ...withStoredPoints(current).user,
-          role: nextRole,
-          displayName: nextRole === "student" ? "Nguyễn Minh Anh" : nextRole === "teacher" ? "Cô Nguyễn Thuỷ" : "Quản trị viên",
-          avatar: nextRole === "student" ? "MA" : nextRole === "teacher" ? "NT" : "QT",
-        },
-      }));
+      setDashboard((current) => ({ ...current, user: { ...current.user, role: nextRole } }));
     } finally {
       setLoading(false);
     }
@@ -260,15 +378,13 @@ export default function SmartLotusApp() {
 
   function applySessionProfile(metadata: Record<string, unknown>, email?: string) {
     const displayName = typeof metadata.displayName === "string" && metadata.displayName.trim() ? metadata.displayName.trim() : undefined;
-    const avatarUrl = typeof metadata.avatarUrl === "string" ? metadata.avatarUrl : undefined;
-    if (!displayName && !avatarUrl && !email) return;
+    if (!displayName && !email) return;
     setDashboard((current) => ({
       ...current,
       user: {
         ...current.user,
         displayName: displayName ?? current.user.displayName,
         email: email ?? current.user.email,
-        avatarUrl,
         avatar: displayName ? displayName.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() : current.user.avatar,
       },
     }));
@@ -280,25 +396,11 @@ export default function SmartLotusApp() {
     if (!raw || typeof raw !== "object") return;
     const candidate = raw as Partial<PlacementResult>;
     if (typeof candidate.level !== "number" || typeof candidate.lessonIndex !== "number") return;
-    try {
-      if (window.localStorage.getItem("smart-lotus-placement") || window.localStorage.getItem("smart-lotus-evaluation")) return;
-      const nextPlacement = candidate as PlacementResult;
-      const nextEvaluation = evaluatePathLocal(nextPlacement, []);
-      window.localStorage.setItem("smart-lotus-placement", JSON.stringify(nextPlacement));
-      window.localStorage.setItem("smart-lotus-evaluation", JSON.stringify(nextEvaluation));
-      if (!window.localStorage.getItem("smart-lotus-initial-intel")) {
-        window.localStorage.setItem("smart-lotus-initial-intel", String(nextEvaluation.intelligenceScore));
-      }
-      setPlacement(nextPlacement);
-      setEvaluation(nextEvaluation);
-    } catch {
-      /* bỏ qua */
-    }
+    const nextPlacement = candidate as PlacementResult;
+    const nextEvaluation = evaluatePathLocal(nextPlacement, []);
+    setPlacement(nextPlacement);
+    setEvaluation(nextEvaluation);
   }
-
-  useEffect(() => {
-    void loadDashboard(role);
-  }, [loadDashboard, role]);
 
   useEffect(() => {
     let mounted = true;
@@ -315,6 +417,7 @@ export default function SmartLotusApp() {
       restorePlacementFromMetadata(data.session.user.user_metadata);
       if (typeof savedFirstName === "string" && savedFirstName.trim()) setGreetingName(savedFirstName.trim());
       setAuthenticated(true);
+      void loadDashboard(nextRole);
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
@@ -326,13 +429,14 @@ export default function SmartLotusApp() {
       restorePlacementFromMetadata(session.user.user_metadata);
       if (typeof savedFirstName === "string" && savedFirstName.trim()) setGreetingName(savedFirstName.trim());
       setAuthenticated(true);
+      void loadDashboard(session.user.user_metadata?.role === "teacher" || session.user.user_metadata?.role === "admin" ? session.user.user_metadata.role : "student");
     });
 
     return () => {
       mounted = false;
       listener.subscription.unsubscribe();
     };
-  }, []);
+  }, [loadDashboard]);
 
   useEffect(() => {
     if (!toast) return;
@@ -340,65 +444,18 @@ export default function SmartLotusApp() {
     return () => window.clearTimeout(timeout);
   }, [toast]);
 
-  useEffect(() => {
-    try {
-      const storedPlacement = window.localStorage.getItem("smart-lotus-placement");
-      const storedAttempts = window.localStorage.getItem("smart-lotus-attempts");
-      const storedEvaluation = window.localStorage.getItem("smart-lotus-evaluation");
-      const storedInitialIntel = window.localStorage.getItem("smart-lotus-initial-intel");
-      const storedStreak = window.localStorage.getItem("smart-lotus-streak");
-      const storedPoints = window.localStorage.getItem("smart-lotus-points");
-      const nextPlacement = storedPlacement ? (JSON.parse(storedPlacement) as PlacementResult) : null;
-      const nextAttempts: AttemptSummary[] = storedAttempts ? (JSON.parse(storedAttempts) as AttemptSummary[]) : [];
-      if (nextPlacement) setPlacement(nextPlacement);
-      if (nextAttempts.length) setAttemptHistory(nextAttempts);
-      if (storedInitialIntel) setInitialIntel(Number(storedInitialIntel) || 50);
-      if (storedStreak) {
-        try {
-          const parsedStreak = JSON.parse(storedStreak) as { count?: number };
-          if (typeof parsedStreak.count === "number") setStudyStreak(parsedStreak.count);
-        } catch {
-          /* bỏ qua */
-        }
-      }
-      if (storedPoints !== null) {
-        setDashboard((current) => ({ ...current, user: { ...current.user, lotusPoints: Number(storedPoints) || 0 } }));
-      }
-      const storedTodayGoal = window.localStorage.getItem("smart-lotus-today-goal");
-      if (storedTodayGoal) {
-        try {
-          const parsedGoal = JSON.parse(storedTodayGoal) as TodayGoal;
-          if (parsedGoal.date === todayKey()) setTodayGoal(parsedGoal);
-        } catch {
-          /* bỏ qua */
-        }
-      }
-      if (storedEvaluation) {
-        setEvaluation(JSON.parse(storedEvaluation) as PathEvaluation);
-      } else if (nextPlacement) {
-        setEvaluation(evaluatePathLocal(nextPlacement, nextAttempts));
-      }
-      if (nextPlacement) void refreshEvaluation(nextPlacement, nextAttempts);
-    } catch {
-      /* dữ liệu cũ không hợp lệ thì bỏ qua */
-    }
-  }, []);
-
   function completeAuthentication(nextRole: Role, firstName?: string, justRegistered = false) {
     setRole(nextRole);
     if (firstName?.trim()) setGreetingName(firstName.trim());
     setAuthenticated(true);
     if (justRegistered && nextRole === "student") {
+      void loadDashboard(nextRole);
       setView("exercises");
       setScreen("guide");
       return;
     }
     const pendingSurvey = window.localStorage.getItem("smart-lotus-pending-survey");
-    if (
-      nextRole === "student" &&
-      pendingSurvey === "1" &&
-      !window.localStorage.getItem("smart-lotus-placement")
-    ) {
+    if (nextRole === "student" && pendingSurvey === "1") {
       window.localStorage.removeItem("smart-lotus-pending-survey");
       setView("exercises");
       setScreen("guide");
@@ -435,7 +492,33 @@ export default function SmartLotusApp() {
       setToast("🎮 Hoàn thành lượt luyện tập tự do. Kết quả không ảnh hưởng hành trình học.");
       return;
     }
-    const lessonSlug = slugifyLesson(currentLessonTitle());
+    if (quizMode === "assignment") {
+      if (!activeAssignment) {
+        setToast("Không tìm thấy bài tập đang làm.");
+        return;
+      }
+      try {
+        const response = await smartLotusApi.submitAssignment(activeAssignment.id, {
+          durationSeconds: Math.max(1, quizResult.duration),
+          challengeDurationSeconds: Math.max(0, Math.round(quizResult.challengeDuration)),
+          answers: quizResult.answers.map(({ questionId, answer }) => ({ questionId, answer })),
+        });
+        setResult((current) => current ? {
+          ...current,
+          score: response.submission.score,
+          baseScore: response.submission.score,
+          bonus: 0,
+          correct: response.submission.correctAnswers,
+          total: response.submission.totalQuestions,
+        } : current);
+        setToast("Đã nộp bài tập cho giáo viên.");
+      } catch (submitError) {
+        setToast(submitError instanceof Error ? submitError.message : "Không thể nộp bài. Hãy thử lại.");
+      }
+      return;
+    }
+    const lesson = currentLesson();
+    const lessonSlug = `level-${lesson.level}-${slugifyLesson(lesson.lessonTitle)}`;
     const attemptSummary: AttemptSummary = {
       lessonSlug,
       correctAnswers: quizResult.correct,
@@ -446,13 +529,13 @@ export default function SmartLotusApp() {
     };
     const nextHistory = [...attemptHistory, attemptSummary].slice(-20);
     setAttemptHistory(nextHistory);
-    try {
-      window.localStorage.setItem("smart-lotus-attempts", JSON.stringify(nextHistory));
-    } catch {
-      /* bộ nhớ cục bộ có thể bị chặn */
-    }
 
     const percent = quizResult.total > 0 ? quizResult.correct / quizResult.total : 0;
+    const difficultyRank: Record<QuizQuestion["difficulty"], number> = { A: 0, B: 1, C: 2, D: 3, E: 4 };
+    const highestDifficulty = quizQuestions.reduce<QuizQuestion["difficulty"]>(
+      (highest, question) => difficultyRank[question.difficulty] > difficultyRank[highest] ? question.difficulty : highest,
+      "A",
+    );
     const isJourney = quizMode === "journey";
     const failedJourney = isJourney && percent < 0.5;
 
@@ -464,17 +547,10 @@ export default function SmartLotusApp() {
       if (failedJourney && nextEvaluation) {
         nextEvaluation = { ...nextEvaluation, intelligenceScore: Math.max(0, nextEvaluation.intelligenceScore - 5) };
         setEvaluation(nextEvaluation);
-        try {
-          window.localStorage.setItem("smart-lotus-evaluation", JSON.stringify(nextEvaluation));
-        } catch {
-          /* bỏ qua */
-        }
       }
       setJourneyFailed(failedJourney);
       setSkipEligible(isJourney && percent >= 0.9 && (nextEvaluation?.intelligenceScore ?? 0) > 90);
     }
-
-    const streakMessage = updateStudyStreak();
 
     try {
       const response = await smartLotusApi.submitAttempt({
@@ -483,10 +559,11 @@ export default function SmartLotusApp() {
         totalQuestions: quizResult.total,
         score: quizResult.score,
         durationSeconds: quizResult.duration,
-        highestDifficulty: "E",
+        highestDifficulty,
         answers: quizResult.answers,
       });
-      accumulateLotusPoints(quizResult.score, response.totalPoints);
+      accumulateLotusPoints(response.totalPoints);
+      const streakMessage = updateStudyStreak();
       setDashboard((current) => ({
         ...current,
         lowScoreAttempts: current.lowScoreAttempts + (quizResult.score < 50 ? 1 : 0),
@@ -500,34 +577,48 @@ export default function SmartLotusApp() {
         setToast(`Kết quả đã được lưu! Điểm sen +${quizResult.score}`);
       }
     } catch {
-      accumulateLotusPoints(quizResult.score);
-      setToast(failedJourney ? "Không đủ điều kiện vượt bài! Chỉ số thông minh bị trừ 5 điểm." : streakMessage ?? "Kết quả đang được lưu tạm trên thiết bị");
+      setToast(failedJourney ? "Không đủ điều kiện vượt bài! Chỉ số thông minh bị trừ 5 điểm." : "Không thể đồng bộ kết quả. Hãy kiểm tra kết nối rồi thử lại.");
     }
   }
 
-  function skipLesson() {
+  function startAssignment(assignment: Assignment) {
+    if (!assignment.questions?.length) {
+      setToast("Bài tập này chưa có câu hỏi.");
+      return;
+    }
+    setActiveAssignment(assignment);
+    setQuizQuestions(assignment.questions);
+    quizGenerationId.current += 1;
+    quizInteracted.current = false;
+    setQuizMode("assignment");
+    setQuizLesson({
+      level: assignment.curriculumLevel ?? 1,
+      lessonTitle: assignment.topic ?? assignment.title,
+    });
+    setJourneyFailed(false);
+    setSkipEligible(false);
+    setScreen("quiz");
+  }
+
+  async function skipLesson() {
     const nextEvaluation = evaluation ? { ...evaluation, lessonIndex: evaluation.lessonIndex + 2 } : null;
     if (nextEvaluation) {
       setEvaluation(nextEvaluation);
-      try {
-        window.localStorage.setItem("smart-lotus-evaluation", JSON.stringify(nextEvaluation));
-      } catch {
-        /* bỏ qua */
-      }
     }
+    let placementSaved = true;
     if (placement) {
       const nextPlacement = { ...placement, lessonIndex: placement.lessonIndex + 2 };
       setPlacement(nextPlacement);
       try {
-        window.localStorage.setItem("smart-lotus-placement", JSON.stringify(nextPlacement));
+        await smartLotusApi.savePlacement(nextPlacement);
       } catch {
-        /* bỏ qua */
+        placementSaved = false;
       }
     }
     setSkipEligible(false);
     setScreen("app");
     setView("exercises");
-    setToast("🐸 Ếch đã nhảy qua 2 lá sen!");
+    setToast(placementSaved ? "🐸 Ếch đã nhảy qua 2 lá sen!" : "Đã nhảy bài nhưng chưa đồng bộ được lộ trình lên máy chủ.");
   }
 
   function currentLesson() {
@@ -568,76 +659,43 @@ export default function SmartLotusApp() {
         attempts: base.attempts + 1,
         accuracySum: base.accuracySum + accuracy,
       };
-      try {
-        window.localStorage.setItem("smart-lotus-today-goal", JSON.stringify(next));
-      } catch {
-        /* bỏ qua */
-      }
       return next;
     });
   }
 
   /** Cộng dồn điểm sen theo tổng các bài làm. */
-  function accumulateLotusPoints(score: number, serverTotal?: number) {
-    try {
-      const base = Number(window.localStorage.getItem("smart-lotus-points") ?? String(dashboard.user.lotusPoints)) || 0;
-      const next = serverTotal ?? base + score;
-      window.localStorage.setItem("smart-lotus-points", String(next));
-      setDashboard((current) => ({ ...current, user: { ...current.user, lotusPoints: next } }));
-      return next;
-    } catch {
-      return dashboard.user.lotusPoints;
-    }
+  function accumulateLotusPoints(serverTotal: number) {
+    setDashboard((current) => ({ ...current, user: { ...current.user, lotusPoints: serverTotal } }));
+    return serverTotal;
   }
 
   /** Chuỗi ngày học: tại mốc 5/10/15 ngày, chỉ số thông minh được cộng thêm. */
   function updateStudyStreak(): string | null {
-    try {
-      const today = new Date().toISOString().slice(0, 10);
-      const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
-      const stored = JSON.parse(window.localStorage.getItem("smart-lotus-streak") ?? "null") as { count?: number; lastDate?: string } | null;
-      let count = 1;
-      if (stored && stored.lastDate === today && typeof stored.count === "number") {
-        count = stored.count;
-      } else if (stored && stored.lastDate === yesterday && typeof stored.count === "number") {
-        count = stored.count + 1;
-      }
-      window.localStorage.setItem("smart-lotus-streak", JSON.stringify({ count, lastDate: today }));
-      setStudyStreak(count);
+    const alreadyActiveToday = dashboard.todayActivity.lessonsCompleted > 0;
+    const previousStreak = dashboard.user.currentStreak;
+    const count = alreadyActiveToday ? previousStreak : previousStreak + 1;
+    setStudyStreak(count);
+    if (alreadyActiveToday) return null;
 
-      const milestones = [5, 10, 15];
-      const awarded: number[] = JSON.parse(window.localStorage.getItem("smart-lotus-streak-awarded") ?? "[]");
-      const hit = milestones.find((m) => count >= m && !awarded.includes(m));
-      if (hit) {
-        const bonus = hit === 5 ? 2 : hit === 10 ? 3 : 4;
-        awarded.push(hit);
-        window.localStorage.setItem("smart-lotus-streak-awarded", JSON.stringify(awarded));
-        setEvaluation((prev) => {
-          const next = prev ? { ...prev, intelligenceScore: Math.min(100, prev.intelligenceScore + bonus) } : prev;
-          if (next) {
-            try {
-              window.localStorage.setItem("smart-lotus-evaluation", JSON.stringify(next));
-            } catch {
-              /* bỏ qua */
-            }
-          }
-          return next;
-        });
-        return `🔥 Chuỗi ${hit} ngày! Chỉ số thông minh +${bonus}`;
-      }
-      return null;
-    } catch {
-      return null;
-    }
+    const hit = [5, 10, 15].find((milestone) => previousStreak < milestone && count >= milestone);
+    if (!hit) return null;
+    const bonus = hit === 5 ? 2 : hit === 10 ? 3 : 4;
+    setEvaluation((previous) => previous
+      ? { ...previous, intelligenceScore: Math.min(100, previous.intelligenceScore + bonus) }
+      : previous);
+    return `🔥 Chuỗi ${hit} ngày! Chỉ số thông minh +${bonus}`;
   }
 
   async function startQuiz(mode: QuizMode = "journey", lessonNumber?: number, attemptMode: AttemptMode = "normal") {
     if (mode === "demo") {
+      quizGenerationId.current += 1;
+      quizLessonNumber.current = undefined;
       // Luyện tập tự do: ngân hàng câu tự viết, không AI, không ảnh hưởng hành trình.
       // Chèn câu phép tính vào các vị trí dạng đặc biệt để demo có đủ 6 cách trả lời.
       setQuizMode(mode);
       setJourneyFailed(false);
       setSkipEligible(false);
+      quizLessonNumber.current = lessonNumber;
       setQuizLesson(null);
       const bank = FILTERED_BANK.length ? FILTERED_BANK : questions;
       const specialSlots = new Set([1, 2, 3, 5, 7]);
@@ -661,7 +719,6 @@ export default function SmartLotusApp() {
     setQuizMode(mode);
     setJourneyFailed(false);
     setSkipEligible(false);
-    setLoading(true);
     const lesson = lessonNumber ? lessonForMapPad(lessonNumber) : currentLesson();
     setQuizLesson({ level: lesson.level, lessonTitle: lesson.lessonTitle });
     const isJourney = mode === "journey";
@@ -677,35 +734,60 @@ export default function SmartLotusApp() {
         ? evaluation.recommendedDifficulties
         : difficultiesForScore(intelligenceScore);
     }
-    try {
+    const generationId = ++quizGenerationId.current;
+    quizInteracted.current = false;
+    const questionBank = FILTERED_BANK.length ? FILTERED_BANK : questions;
+    const excludePrompts = [...seenQuizPrompts.current].slice(-40);
+    const fallbackQuestions = makeFreshFallbackQuestions(questionBank, seenQuizPrompts.current, 10);
+    fallbackQuestions.forEach((question) => seenQuizPrompts.current.add(questionPromptKey(question.prompt)));
+    setQuizQuestions(fallbackQuestions);
+    setScreen("quiz");
+    setToast("Đang tạo đề bằng Ollama; bạn có thể bắt đầu học ngay.");
+
+    void (async () => {
+      try {
       const generated = await smartLotusApi.generateQuiz({
         topic,
         curriculumLevel: lesson.level,
         difficulties,
-        count: 20,
+        count: 10,
         intelligenceScore,
+        variationSeed: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        excludePrompts,
       });
-      const validQuestions = generated.questions.filter(isAllowedQuestion);
-      setQuizQuestions(validQuestions.length ? validQuestions : FILTERED_BANK.length ? FILTERED_BANK : questions);
-      setScreen("quiz");
+      if (generationId !== quizGenerationId.current || quizInteracted.current) return;
+      const uniqueQuestions = new Map<string, QuizQuestion>();
+      generated.questions.filter(isAllowedQuestion).forEach((question) => {
+        const key = questionPromptKey(question.prompt);
+        if (!seenQuizPrompts.current.has(key) && !uniqueQuestions.has(key)) uniqueQuestions.set(key, question);
+      });
+      const aiQuestions = [...uniqueQuestions.values()].slice(0, 10);
+      const selectedPrompts = new Set([...seenQuizPrompts.current, ...aiQuestions.map((question) => questionPromptKey(question.prompt))]);
+      const fallbackFill = makeFreshFallbackQuestions(questionBank, selectedPrompts, 10 - aiQuestions.length);
+      const finalQuestions = [...aiQuestions, ...fallbackFill].map((question, index) => ({ ...question, id: index + 1 }));
+      if (finalQuestions.length === 10) {
+        finalQuestions.forEach((question) => seenQuizPrompts.current.add(questionPromptKey(question.prompt)));
+        setQuizQuestions(finalQuestions);
+      }
       setToast(
-        generated.source === "ai"
+        generated.source === "ai" && aiQuestions.length === 10
           ? isJourney
             ? attemptMode === "hard"
-              ? `Đã tạo đề bàn khó cho "${lesson.lessonTitle}" bằng DeepSeek`
+              ? `Đã tạo đề bàn khó cho "${lesson.lessonTitle}" bằng Ollama`
               : attemptMode === "retry"
-                ? `Đã tạo đề làm lại "${lesson.lessonTitle}" bằng DeepSeek`
-                : `Đã tạo đề "${lesson.lessonTitle}" (chỉ số ${intelligenceScore}/100) bằng DeepSeek`
-            : "Đã tạo đề ôn tập 20 câu bằng DeepSeek"
-          : "Đang dùng bộ câu hỏi dự phòng"
+                ? `Đã tạo đề làm lại "${lesson.lessonTitle}" bằng Ollama`
+                : `Đã tạo đề "${lesson.lessonTitle}" (chỉ số ${intelligenceScore}/100) bằng Ollama`
+            : "Đã tạo đề ôn tập 10 câu bằng Ollama"
+          : generated.source === "ai"
+            ? `AI chỉ tạo được ${aiQuestions.length}/10 câu; đã bổ sung câu hỏi có sẵn`
+            : "AI chưa tạo được đề hợp lệ; đang dùng câu hỏi có sẵn"
       );
-    } catch {
-      setQuizQuestions(FILTERED_BANK.length ? FILTERED_BANK : questions);
-      setScreen("quiz");
-      setToast("Không thể kết nối AI, đang dùng bộ câu hỏi dự phòng");
-    } finally {
-      setLoading(false);
-    }
+      } catch {
+        if (generationId === quizGenerationId.current && !quizInteracted.current) {
+          setToast("Ollama chưa phản hồi; đang dùng câu hỏi có sẵn");
+        }
+      }
+    })();
   }
 
   async function refreshEvaluation(placementResult: PlacementResult, attempts: AttemptSummary[]): Promise<PathEvaluation | null> {
@@ -713,7 +795,6 @@ export default function SmartLotusApp() {
     try {
       const { evaluation: nextEvaluation } = await smartLotusApi.evaluatePath({ placement: placementResult, attempts });
       setEvaluation(nextEvaluation);
-      window.localStorage.setItem("smart-lotus-evaluation", JSON.stringify(nextEvaluation));
       return nextEvaluation;
     } catch {
       const localEvaluation = evaluatePathLocal(placementResult, attempts);
@@ -724,23 +805,11 @@ export default function SmartLotusApp() {
 
   async function beginSurvey() {
     // Tài khoản mới: làm mới hoàn toàn hành trình ếch, chỉ số thông minh và điểm sen.
-    const resetKeys = [
-      "smart-lotus-placement",
-      "smart-lotus-attempts",
-      "smart-lotus-evaluation",
-      "smart-lotus-points",
-      "smart-lotus-streak",
-      "smart-lotus-streak-awarded",
-      "smart-lotus-initial-intel",
-    ];
-    resetKeys.forEach((key) => window.localStorage.removeItem(key));
-    window.localStorage.setItem("smart-lotus-points", "0");
     setPlacement(null);
     setEvaluation(null);
     setAttemptHistory([]);
     setStudyStreak(0);
     setInitialIntel(50);
-    setDashboard((current) => ({ ...current, user: { ...current.user, lotusPoints: 0 } }));
 
     setLoading(true);
     try {
@@ -748,7 +817,7 @@ export default function SmartLotusApp() {
       if (!generated.questions.length) throw new Error("Không nhận được câu hỏi khảo sát");
       setSurveyQuestions(generated.questions);
       setScreen("survey");
-      setToast(generated.source === "ai" ? "Đã tạo đề khảo sát 30 câu bằng DeepSeek" : "Đang dùng đề khảo sát dự phòng");
+      setToast(generated.source === "ai" ? "Đã tạo đề khảo sát 30 câu bằng Ollama" : "Đang dùng đề khảo sát dự phòng");
     } catch {
       setSurveyQuestions(null);
       setScreen("app");
@@ -767,30 +836,31 @@ export default function SmartLotusApp() {
     const levelMeta = curriculum[surveyPlacement.level - 1] ?? curriculum[0];
     const lessonTitle = levelMeta.lessons[Math.min(surveyPlacement.lessonIndex, levelMeta.lessons.length - 1)];
     setToast(`Khảo sát xong! Bạn bắt đầu từ Level ${surveyPlacement.level} — ${lessonTitle}`);
+    let placementSaved = false;
     try {
-      window.localStorage.setItem("smart-lotus-placement", JSON.stringify(surveyPlacement));
-      await supabase.auth.updateUser({ data: { placement: surveyPlacement } });
+      await smartLotusApi.savePlacement(surveyPlacement);
+      placementSaved = true;
     } catch {
-      /* lưu metadata là tùy chọn */
+      /* kết quả vẫn giữ trên thiết bị nếu server tạm thời không sẵn sàng */
     }
+    await supabase.auth.updateUser({ data: { placement: surveyPlacement } }).catch(() => undefined);
+    if (!placementSaved) setToast("Khảo sát đã xong nhưng chưa đồng bộ được lên máy chủ. Hãy giữ trang này mở và thử đăng nhập lại.");
     const initialEvaluation = evaluatePathLocal(surveyPlacement, []);
     setInitialIntel(initialEvaluation.intelligenceScore);
-    try {
-      window.localStorage.setItem("smart-lotus-initial-intel", String(initialEvaluation.intelligenceScore));
-    } catch {
-      /* bỏ qua */
-    }
     setEvaluation(initialEvaluation);
     void refreshEvaluation(surveyPlacement, attemptHistory);
     await loadDashboard("student");
-    // Học sinh mới luôn bắt đầu với 0 điểm sen.
-    const savedPoints = window.localStorage.getItem("smart-lotus-points");
-    if (savedPoints !== null) {
-      setDashboard((current) => ({ ...current, user: { ...current.user, lotusPoints: Number(savedPoints) || 0 } }));
-    }
   }
 
   function exitQuiz() {
+    quizGenerationId.current += 1;
+    if (quizMode === "assignment") {
+      setQuizQuestions(questions);
+      setActiveAssignment(null);
+      setScreen("app");
+      setView("classrooms");
+      return;
+    }
     if (quizMode === "demo") {
       setQuizQuestions(questions);
       setScreen("app");
@@ -800,13 +870,6 @@ export default function SmartLotusApp() {
     }
     setEvaluation((prev) => {
       const next = prev ? { ...prev, intelligenceScore: Math.max(0, prev.intelligenceScore - 5) } : prev;
-      if (next) {
-        try {
-          window.localStorage.setItem("smart-lotus-evaluation", JSON.stringify(next));
-        } catch {
-          /* bỏ qua */
-        }
-      }
       return next;
     });
     setQuizQuestions(questions);
@@ -836,7 +899,18 @@ export default function SmartLotusApp() {
   }
 
   if (screen === "quiz") {
-    return <QuizExperience quizQuestions={quizQuestions} onExit={exitQuiz} onComplete={completeQuiz} isDemo={quizMode === "demo"} />;
+    return (
+      <QuizExperience
+        quizQuestions={quizQuestions}
+        onExit={exitQuiz}
+        onComplete={completeQuiz}
+        onInteract={() => {
+          quizInteracted.current = true;
+        }}
+        isDemo={quizMode === "demo"}
+        isAssignment={quizMode === "assignment"}
+      />
+    );
   }
 
   if (screen === "result" && result) {
@@ -848,16 +922,35 @@ export default function SmartLotusApp() {
         onSkip={skipLesson}
         onHome={() => {
           setScreen("app");
-          setView("home");
-          void loadDashboard("student");
+          setView(quizMode === "assignment" ? "classrooms" : "home");
+          if (quizMode === "assignment") setActiveAssignment(null);
+          else void loadDashboard("student");
         }}
-        onRetry={() => setScreen("quiz")}
+        onRetry={() => {
+          if (quizMode === "demo") {
+            setScreen("quiz");
+            return;
+          }
+          if (quizMode === "assignment" && activeAssignment?.questions) {
+            setQuizQuestions(activeAssignment.questions);
+            setScreen("quiz");
+            return;
+          }
+          void startQuiz(quizMode, quizLessonNumber.current, "retry");
+        }}
         onPrevious={() => {
           setScreen("app");
-          setView("exercises");
-          setToast("Hãy ôn lại bài trước: Đếm và so sánh số");
+          setView(quizMode === "assignment" ? "classrooms" : "exercises");
+          if (quizMode === "assignment") setActiveAssignment(null);
+          else setToast("Hãy ôn lại bài trước: Đếm và so sánh số");
         }}
         onNext={() => {
+          if (quizMode === "assignment") {
+            setScreen("app");
+            setView("classrooms");
+            setActiveAssignment(null);
+            return;
+          }
           if (dashboard.lowScoreAttempts > 3) {
             setToast("Bạn cần ôn lại bài trước khi mở bài tiếp theo.");
             return;
@@ -897,9 +990,9 @@ export default function SmartLotusApp() {
             ))
           ) : role === "teacher" ? (
             <>
-              <button className="nav-item active"><Icon name="chart" /><span>Tổng quan lớp</span></button>
-              <button className="nav-item"><Icon name="users" /><span>Học sinh</span></button>
-              <button className="nav-item"><Icon name="book" /><span>Bài tập</span></button>
+              <button className={`nav-item ${teacherView === "overview" ? "active" : ""}`} onClick={() => { setTeacherView("overview"); setMobileOpen(false); }}><Icon name="chart" /><span>Tổng quan lớp</span></button>
+              <button className={`nav-item ${teacherView === "classes" ? "active" : ""}`} onClick={() => { setTeacherView("classes"); setMobileOpen(false); }}><Icon name="school" /><span>Lớp học</span></button>
+              <button className={`nav-item ${teacherView === "assignments" ? "active" : ""}`} onClick={() => { setTeacherView("assignments"); setMobileOpen(false); }}><Icon name="book" /><span>Bài tập</span></button>
               <button className="nav-item"><Icon name="wand" /><span>Tạo câu hỏi AI</span><span className="soon-chip">Sớm</span></button>
             </>
           ) : (
@@ -946,7 +1039,7 @@ export default function SmartLotusApp() {
             <div className="mobile-logo"><LotusLogo compact /></div>
             <div className="page-heading">
               <span>{role === "student" ? "Không gian học tập" : role === "teacher" ? "Trung tâm giáo viên" : "Bảng điều hành"}</span>
-              <strong>{role === "student" ? navItems.find((item) => item.id === view)?.label : role === "teacher" ? "Lớp 1A" : "Quản trị hệ thống"}</strong>
+              <strong>{role === "student" ? navItems.find((item) => item.id === view)?.label : role === "teacher" ? teacherView === "overview" ? "Tổng quan lớp" : teacherView === "classes" ? "Lớp học" : "Bài tập" : "Quản trị hệ thống"}</strong>
             </div>
           </div>
           <div className="topbar-actions">
@@ -956,7 +1049,7 @@ export default function SmartLotusApp() {
                 <button className="points-pill" onClick={() => setView("achievements")} aria-label="Xem điểm sen và thành tích"><span style={{ fontSize: 15 }}>🌸</span><strong>{dashboard.user.lotusPoints.toLocaleString("vi-VN")}</strong><span>điểm sen</span></button>
               </>
             )}
-            <button className="icon-button notification-button" aria-label="Thông báo"><Icon name="bell" /><span /></button>
+            <button className="icon-button notification-button" aria-label={role === "student" ? "Xem lời mời vào lớp" : "Thông báo"} onClick={() => { if (role === "student") setView("classrooms"); }}><Icon name="bell" /><span /></button>
             <div className="profile-wrap">
               <button className="profile-button" onClick={() => setProfileOpen((open) => !open)} aria-expanded={profileOpen}>
                 {dashboard.user.avatarUrl ? <img className="avatar avatar-image" src={dashboard.user.avatarUrl} alt="Avatar" /> : <span className="avatar">{dashboard.user.avatar}</span>}
@@ -979,9 +1072,20 @@ export default function SmartLotusApp() {
         >
           {loading && <div className="loading-line" />}
           {role === "student" ? (
-            <StudentContent view={view} dashboard={dashboard} greetingName={greetingName} todayLabel={todayLabel} evaluation={evaluation} initialIntel={initialIntel} todayGoal={todayGoal} studyStreak={studyStreak} attemptHistory={attemptHistory} onStartQuiz={(lessonNumber, attemptMode) => void startQuiz("journey", lessonNumber, attemptMode)} onStartReview={() => void startQuiz("review")} onStartDemo={() => void startQuiz("demo")} onOpenExercises={() => setView("exercises")} onOpenCompetition={() => setView("compete")} />
+            <StudentContent view={view} dashboard={dashboard} greetingName={greetingName} todayLabel={todayLabel} evaluation={evaluation} initialIntel={initialIntel} todayGoal={todayGoal} studyStreak={studyStreak} attemptHistory={attemptHistory} onStartQuiz={(lessonNumber, attemptMode) => void startQuiz("journey", lessonNumber, attemptMode)} onStartReview={() => void startQuiz("review")} onStartDemo={() => void startQuiz("demo")} onOpenExercises={() => setView("exercises")} onOpenCompetition={() => setView("compete")} onStartAssignment={startAssignment} />
           ) : role === "teacher" ? (
-            <TeacherDashboard onToast={setToast} />
+            teacherView === "overview" ? (
+              <TeacherOverview
+                teacherName={dashboard.user.displayName}
+                onToast={setToast}
+                onCreateAssignment={() => setTeacherView("assignments")}
+                onSendNotification={(title, description) => setToast(`Đã gửi thông báo: ${title} — ${description}`)}
+              />
+            ) : teacherView === "classes" ? (
+              <Classroom />
+            ) : (
+              <AssignmentBuilder onBack={() => setTeacherView("overview")} onToast={setToast} />
+            )
           ) : (
             <AdminDashboard />
           )}
@@ -1038,9 +1142,17 @@ function ProfileEditor({ user, onClose, onSaved }: { user: DashboardData["user"]
       data: {
         displayName: trimmedName,
         firstName: trimmedName.split(/\s+/).pop(),
-        avatarUrl,
       },
     });
+    if (!updateError) {
+      try {
+        await smartLotusApi.updateProfile({ displayName: trimmedName, avatarUrl });
+      } catch {
+        setSaving(false);
+        setError("Thông tin Auth đã cập nhật nhưng hồ sơ học tập chưa đồng bộ. Vui lòng thử lại.");
+        return;
+      }
+    }
     setSaving(false);
     if (updateError) {
       setError("Không thể lưu thông tin. Vui lòng thử lại.");
@@ -1093,6 +1205,21 @@ function ProfileEditor({ user, onClose, onSaved }: { user: DashboardData["user"]
   );
 }
 
+type RegistrationWard = { name: string; code: number };
+type RegistrationProvince = { name: string; code: number; wards: RegistrationWard[] };
+type RegistrationSchoolLevel = "primary" | "lowerSecondary" | "upperSecondary" | "integrated";
+
+const REGISTRATION_GRADES = Array.from({ length: 12 }, (_, i) => `Khối ${i + 1}`);
+const REGISTRATION_GRADES_BY_LEVEL: Record<RegistrationSchoolLevel, string[]> = {
+  primary: REGISTRATION_GRADES.slice(0, 5),
+  lowerSecondary: REGISTRATION_GRADES.slice(5, 9),
+  upperSecondary: REGISTRATION_GRADES.slice(9, 12),
+  integrated: REGISTRATION_GRADES,
+};
+const REGISTRATION_DAYS = Array.from({ length: 31 }, (_, i) => String(i + 1));
+const REGISTRATION_MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1));
+const REGISTRATION_YEARS = Array.from({ length: 60 }, (_, i) => String(new Date().getFullYear() - i));
+
 function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstName?: string, justRegistered?: boolean) => void }) {
   const [mode, setMode] = useState<AuthMode>("login");
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
@@ -1100,11 +1227,44 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
   const [password, setPassword] = useState("");
   const [lastName, setLastName] = useState("");
   const [firstName, setFirstName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [province, setProvince] = useState("");
+  const [district, setDistrict] = useState("");
+  const [school, setSchool] = useState("");
+  const [schoolLevel, setSchoolLevel] = useState<RegistrationSchoolLevel | "">("");
+  const [grade, setGrade] = useState("");
+  const [className, setClassName] = useState("");
+  const [day, setDay] = useState("");
+  const [month, setMonth] = useState("");
+  const [year, setYear] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [showRecovery, setShowRecovery] = useState(false);
   const emailInputRef = useRef<HTMLInputElement>(null);
+  const [registrationProvinces, setRegistrationProvinces] = useState<RegistrationProvince[]>([]);
+  const [locationsLoading, setLocationsLoading] = useState(true);
+  const [locationsError, setLocationsError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    fetch("https://provinces.open-api.vn/api/v2/?depth=2")
+      .then((response) => {
+        if (!response.ok) throw new Error("Address data request failed");
+        return response.json() as Promise<RegistrationProvince[]>;
+      })
+      .then((data) => {
+        if (!active) return;
+        setRegistrationProvinces(data);
+      })
+      .catch(() => {
+        if (active) setLocationsError("Không tải được danh mục tỉnh/thành, xã/phường. Vui lòng tải lại trang.");
+      })
+      .finally(() => {
+        if (active) setLocationsLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
 
   const roleOptions: Array<{ role: Role; title: string; description: string; icon: IconName }> = [
     { role: "student", title: "Học sinh", description: "Học bài, luyện tập và chinh phục thành tích", icon: "book" },
@@ -1112,6 +1272,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
     { role: "admin", title: "Quản trị viên", description: "Vận hành nội dung và hệ thống Smart Lotus", icon: "shield" },
   ];
   const visibleRoleOptions = mode === "register" ? roleOptions.filter((option) => option.role !== "admin") : roleOptions;
+  const availableGrades = schoolLevel ? REGISTRATION_GRADES_BY_LEVEL[schoolLevel] : REGISTRATION_GRADES;
 
   function changeAuthMode(nextMode: AuthMode) {
     setMode(nextMode);
@@ -1209,6 +1370,24 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
       setError("Vui lòng nhập đúng địa chỉ Gmail, ví dụ: ban@gmail.com.");
       return;
     }
+    if (mode === "register") {
+      if (!/^0\d{9}$/.test(phone)) {
+        setError("Số điện thoại phải có 10 chữ số và bắt đầu bằng 0.");
+        return;
+      }
+      if (!province || !district || !schoolLevel || !school.trim()) {
+        setError("Vui lòng chọn tỉnh/thành phố, xã/phường, cấp trường và nhập tên trường.");
+        return;
+      }
+      if (selectedRole === "student" && (!grade || !className.trim())) {
+        setError("Vui lòng chọn khối và nhập lớp học của bạn.");
+        return;
+      }
+      if (!day || !month || !year) {
+        setError("Vui lòng chọn ngày, tháng và năm sinh.");
+        return;
+      }
+    }
     if (mode === "register" && !isValidPassword(password)) {
       setError("Mật khẩu phải có ít nhất 9 ký tự, gồm ít nhất 1 chữ cái và 1 chữ số.");
       return;
@@ -1220,7 +1399,21 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
         const { data, error: signUpError } = await supabase.auth.signUp({
           email: email.trim().toLowerCase(),
           password,
-          options: { data: { displayName: `${lastName.trim()} ${firstName.trim()}`, firstName: firstName.trim(), lastName: lastName.trim(), role: selectedRole } },
+          options: { data: {
+            displayName: `${lastName.trim()} ${firstName.trim()}`,
+            firstName: firstName.trim(),
+            lastName: lastName.trim(),
+            role: selectedRole,
+            phone,
+            province,
+            district,
+            ward: district,
+            school: school.trim(),
+            schoolLevel,
+            grade,
+            className: className.trim(),
+            birthDate: `${day}/${month}/${year}`,
+          } },
         });
         if (signUpError) throw signUpError;
         if (!data.session) {
@@ -1288,7 +1481,58 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
             <div className="auth-role-label"><strong>{mode === "register" ? "2. Thông tin tài khoản" : "Thông tin tài khoản"}</strong><span>Bảo mật</span></div>
             {mode === "register" && <div className="auth-name-fields"><label>Họ<input value={lastName} onChange={(event) => setLastName(event.target.value)} placeholder="Nguyễn" /></label><label>Tên<input value={firstName} onChange={(event) => setFirstName(event.target.value)} placeholder="Minh Anh" /></label></div>}
             <label>Email<input ref={emailInputRef} type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="ban@example.com" /></label>
+            {mode === "register" && (
+              <label>Số điện thoại<input value={phone} onChange={(event) => setPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} placeholder="0901234567" /></label>
+            )}
+            {mode === "register" && (
+              <div className="auth-register-grid auth-register-grid-3">
+                <label>Tỉnh/TP<select value={province} disabled={locationsLoading || Boolean(locationsError)} onChange={(event) => { setProvince(event.target.value); setDistrict(""); setSchool(""); setGrade(""); setClassName(""); }}>
+                  <option value="">{locationsLoading ? "Đang tải..." : "Chọn"}</option>
+                  {registrationProvinces.map((item) => <option key={item.code} value={item.name}>{item.name}</option>)}
+                </select></label>
+                <label>Xã/Phường<select value={district} disabled={!province} onChange={(event) => { setDistrict(event.target.value); setSchool(""); setGrade(""); setClassName(""); }}>
+                  <option value="">Chọn</option>
+                  {registrationProvinces.find((item) => item.name === province)?.wards.map((item) => <option key={item.code} value={item.name}>{item.name}</option>)}
+                </select></label>
+                <label>Cấp trường<select value={schoolLevel} onChange={(event) => { setSchoolLevel(event.target.value as RegistrationSchoolLevel | ""); setGrade(""); setClassName(""); }}>
+                  <option value="">Chọn</option>
+                  <option value="primary">Tiểu học</option>
+                  <option value="lowerSecondary">Trung học cơ sở (THCS)</option>
+                  <option value="upperSecondary">Trung học phổ thông (THPT)</option>
+                  <option value="integrated">Trường liên cấp / Khác</option>
+                </select></label>
+              </div>
+            )}
+            {mode === "register" && <label>Tên trường<input value={school} disabled={!district || !schoolLevel} onChange={(event) => setSchool(event.target.value)} placeholder="Nhập tên trường" /></label>}
+            {mode === "register" && selectedRole === "student" && (
+              <div className="auth-register-grid">
+                <label>Khối<select value={grade} onChange={(event) => setGrade(event.target.value)} disabled={!school || !schoolLevel}>
+                  <option value="">Chọn</option>
+                  {availableGrades.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select></label>
+                <label>Lớp<input list="registration-classes" value={className} onChange={(event) => setClassName(event.target.value)} placeholder="Ví dụ: 1A" disabled={!grade} />
+                  <datalist id="registration-classes">{["A", "B", "C", "D", "E", "F", "G", "H"].map((letter) => <option key={letter} value={`${grade.replace("Khối ", "")}${letter}`} />)}</datalist>
+                </label>
+              </div>
+            )}
+            {mode === "register" && (
+              <div className="auth-register-grid auth-register-grid-3">
+                <label>Ngày<select value={day} onChange={(event) => setDay(event.target.value)}>
+                  <option value="">Ngày</option>
+                  {REGISTRATION_DAYS.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select></label>
+                <label>Tháng<select value={month} onChange={(event) => setMonth(event.target.value)}>
+                  <option value="">Tháng</option>
+                  {REGISTRATION_MONTHS.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select></label>
+                <label>Năm<select value={year} onChange={(event) => setYear(event.target.value)}>
+                  <option value="">Năm</option>
+                  {REGISTRATION_YEARS.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select></label>
+              </div>
+            )}
             <label>Mật khẩu<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" /></label>
+            {mode === "register" && locationsError && <p className="auth-error" role="alert">{locationsError}</p>}
             {error && <p className="auth-error" role="alert"><Icon name="close" size={14} />{error}</p>}
             {notice && <p className="auth-notice" role="status"><Icon name="check" size={14} />{notice}</p>}
             <button className="primary-button auth-submit" type="submit" disabled={submitting}>{submitting ? "Đang xử lý..." : mode === "login" ? "Đăng nhập vào Smart Lotus" : "Tạo tài khoản"}{!submitting && <Icon name="arrow" size={17} />}</button>
@@ -1340,9 +1584,10 @@ function OnboardingGuide({ studentName, onStart }: { studentName: string; onStar
   );
 }
 
-function StudentContent({ view, dashboard, greetingName, todayLabel, evaluation, initialIntel, todayGoal, studyStreak, attemptHistory, onStartQuiz, onStartReview, onStartDemo, onOpenExercises, onOpenCompetition }: { view: StudentView; dashboard: DashboardData; greetingName: string; todayLabel: string; evaluation: PathEvaluation | null; initialIntel: number; todayGoal: TodayGoal; studyStreak: number; attemptHistory: AttemptSummary[]; onStartQuiz: (lessonNumber?: number, mode?: AttemptMode) => void; onStartReview: () => void; onStartDemo: () => void; onOpenExercises: () => void; onOpenCompetition: () => void }) {
+function StudentContent({ view, dashboard, greetingName, todayLabel, evaluation, initialIntel, todayGoal, studyStreak, attemptHistory, onStartQuiz, onStartReview, onStartDemo, onOpenExercises, onOpenCompetition, onStartAssignment }: { view: StudentView; dashboard: DashboardData; greetingName: string; todayLabel: string; evaluation: PathEvaluation | null; initialIntel: number; todayGoal: TodayGoal; studyStreak: number; attemptHistory: AttemptSummary[]; onStartQuiz: (lessonNumber?: number, mode?: AttemptMode) => void; onStartReview: () => void; onStartDemo: () => void; onOpenExercises: () => void; onOpenCompetition: () => void; onStartAssignment: (assignment: Assignment) => void }) {
   const currentIntel = evaluation?.intelligenceScore ?? initialIntel;
   const journeyLocked = initialIntel < 30 && currentIntel < 50;
+  if (view === "classrooms") return <StudentClassrooms onStartAssignment={onStartAssignment} />;
   if (view === "exercises") return <ExerciseMapView onStartQuiz={onStartQuiz} onStartReview={onStartReview} onStartDemo={onStartDemo} initialCleared={clearedLessonsBefore(evaluation)} journeyLocked={journeyLocked} intelScore={currentIntel} lotusPoints={dashboard.user.lotusPoints} />;
   if (view === "roadmap") return <RoadmapView onStartQuiz={onStartQuiz} evaluation={evaluation} />;
   if (view === "compete") return <CompetitionView weeklyLeaderboard={dashboard.weeklyLeaderboard} currentAvatar={dashboard.user.avatar} />;
@@ -1439,7 +1684,7 @@ function StudentDashboard({ dashboard, greetingName, todayLabel, todayGoal, stud
               <span className="float-symbol s1">+</span><span className="float-symbol s2">=</span><span className="float-symbol s3">🐸</span>
             </div>
             <div className="lesson-info">
-              <div className="lesson-tags"><span>LEVEL {activeLevel}</span><span><Icon name="target" size={13} /> 20 câu AI</span></div>
+              <div className="lesson-tags"><span>LEVEL {activeLevel}</span><span><Icon name="target" size={13} /> 10 câu AI</span></div>
               <h3>{nextLessonTitle}</h3>
               <p>{nextLevelMeta.competency}</p>
               <div className="progress-label"><span>Tiến độ bài học</span><strong>{nextLessonIndex}/{nextLevelMeta.total} dạng</strong></div>
@@ -1614,7 +1859,7 @@ function ExerciseMapView({ onStartQuiz, onStartReview, onStartDemo, initialClear
             <button style={choiceCard(journeyLocked)} onClick={() => { if (!journeyLocked) setMode("journey"); }}>
               <span style={{ fontSize: 30 }}>🐸</span>
               <strong style={{ fontSize: 15 }}>Hành trình ếch xanh {journeyLocked && "🔒"}</strong>
-              <small style={{ color: "#918a99", fontSize: 11, lineHeight: 1.5 }}>{journeyLocked ? "Đang khóa — cần đạt 50/100 chỉ số thông minh để mở lại." : "Chinh phục dòng sông, mỗi bài 20 câu ngẫu nhiên do AI."}</small>
+              <small style={{ color: "#918a99", fontSize: 11, lineHeight: 1.5 }}>{journeyLocked ? "Đang khóa — cần đạt 50/100 chỉ số thông minh để mở lại." : "Chinh phục dòng sông, mỗi bài 10 câu ngẫu nhiên do AI."}</small>
             </button>
             <button style={choiceCard()} onClick={() => setMode("review")}>
               <span style={{ fontSize: 30 }}>📚</span>
@@ -1654,7 +1899,7 @@ function ExerciseMapView({ onStartQuiz, onStartReview, onStartDemo, initialClear
             <div className="progress-bar" style={{ flex: 1, height: 10, margin: 0 }}><span style={{ width: `${intelScore}%`, background: "linear-gradient(90deg,#8b5cf6,#ec4899)" }} /></div>
             <strong style={{ color: "var(--purple)", fontSize: 15 }}>{intelScore}<small style={{ color: "#98919e", fontSize: 10 }}> /100</small></strong>
           </div>
-          <button className="primary-button big" onClick={onStartReview}><Icon name="play" size={18} /> Bắt đầu ôn tập (20 câu)</button>
+          <button className="primary-button big" onClick={onStartReview}><Icon name="play" size={18} /> Bắt đầu ôn tập (10 câu)</button>
         </section>
       ) : (
         <MathLevelMap onStartQuiz={onStartQuiz} initialCleared={initialCleared} lotusPoints={lotusPoints} />
@@ -1763,23 +2008,6 @@ function AchievementsView({ dashboard }: { dashboard: DashboardData }) {
   );
 }
 
-function TeacherDashboard({ onToast }: { onToast: (message: string) => void }) {
-  return (
-    <div className="view-stack">
-      <section className="page-intro teacher-intro"><div><span className="eyebrow purple"><Icon name="school" size={16} /> LỚP 1A · 32 HỌC SINH</span><h1>Chào cô Thuỷ!</h1><p>Theo dõi tiến độ lớp học và hỗ trợ từng học sinh đúng lúc.</p></div><button className="primary-button" onClick={() => onToast("Đã tạo bản nháp bài tập mới")}><Icon name="plus" /> Tạo bài tập</button></section>
-      <section className="stat-grid teacher-stats"><StatCard icon="users" tone="purple" value="28/32" label="Học sinh hoạt động" change="Trong 7 ngày qua"/><StatCard icon="target" tone="green" value="84%" label="Điểm trung bình" change="Tăng 6%"/><StatCard icon="book" tone="orange" value="156" label="Bài đã hoàn thành" change="Tuần này"/><StatCard icon="clock" tone="pink" value="18 phút" label="Thời gian học TB" change="Mỗi ngày"/></section>
-      <div className="teacher-grid">
-        <section className="card student-table-card"><div className="card-heading"><div><span className="section-kicker">HỌC SINH</span><h2>Tiến độ cần chú ý</h2></div><div className="search-box"><Icon name="search" size={17}/><span>Tìm học sinh...</span></div></div><div className="student-table"><div className="table-head"><span>Học sinh</span><span>Tiến độ</span><span>Điểm gần nhất</span><span>Trạng thái</span></div>{teacherStudents.map((student, index) => <div className="table-row" key={student.name}><span className="student-name"><i className={`student-avatar tone-${index}`}>{student.initials}</i><strong>{student.name}</strong></span><span className="table-progress"><i><b style={{ width: `${student.progress}%` }}/></i>{student.progress}%</span><strong>{student.score}</strong><em className={`status-${index}`}>{student.status}</em></div>)}</div></section>
-        <section className="card class-focus"><div className="card-heading"><div><span className="section-kicker">PHÂN TÍCH NHANH</span><h2>Năng lực lớp học</h2></div></div><div className="skill-bars"><SkillBar label="Nhận biết số" value={92}/><SkillBar label="So sánh" value={84}/><SkillBar label="Phép cộng" value={76}/><SkillBar label="Phép trừ" value={68}/><SkillBar label="Bài toán có lời văn" value={55}/></div><div className="insight-note"><Icon name="sparkles"/><div><strong>Gợi ý cho cô</strong><p>Lớp cần ôn thêm bài toán có lời văn và phép trừ.</p></div></div></section>
-      </div>
-    </div>
-  );
-}
-
-function SkillBar({ label, value }: { label: string; value: number }) {
-  return <div><span><strong>{label}</strong><b>{value}%</b></span><i><b style={{ width: `${value}%` }}/></i></div>;
-}
-
 function AdminDashboard() {
   return (
     <div className="view-stack">
@@ -1797,7 +2025,7 @@ function ServiceStatus({ icon, name, detail, standby = false }: { icon: IconName
   return <div><span><Icon name={icon}/></span><div><strong>{name}</strong><small>{detail}</small></div><em className={standby ? "standby" : ""}>{standby ? "Chờ API" : "Online"}</em></div>;
 }
 
-function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: { quizQuestions: QuizQuestion[]; onExit: () => void; onComplete: (result: QuizResult) => void; isDemo?: boolean }) {
+function QuizExperience({ quizQuestions, onExit, onComplete, onInteract, isDemo = false, isAssignment = false }: { quizQuestions: QuizQuestion[]; onExit: () => void; onComplete: (result: QuizResult) => void; onInteract: () => void; isDemo?: boolean; isAssignment?: boolean }) {
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [confirmExit, setConfirmExit] = useState(false);
@@ -1808,17 +2036,16 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
   const [seconds, setSeconds] = useState(0);
   const [challengeStartedAt, setChallengeStartedAt] = useState<number | null>(null);
   const [answers, setAnswers] = useState<AttemptPayload["answers"]>([]);
-  const [phaseUnlock, setPhaseUnlock] = useState(false);
   const [lastCorrect, setLastCorrect] = useState(false);
   const [typed, setTyped] = useState("");
   const [lineValue, setLineValue] = useState(0);
   const [tokens, setTokens] = useState<string[]>([]);
+  const [selectedImageOptions, setSelectedImageOptions] = useState<string[]>([]);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const question = quizQuestions[index];
   const meta = difficultyMeta[question.difficulty];
   const normalTotal = Math.max(1, Math.ceil(quizQuestions.length / 2));
-  const challengeTotal = quizQuestions.length - normalTotal;
-  const mode = answerModeFor(question, index);
+  const mode = isAssignment ? question.answerMode ?? "choice" : answerModeFor(question, index);
   const inputState: "idle" | "correct" | "wrong" = selected === null ? "idle" : lastCorrect ? "correct" : "wrong";
 
   useEffect(() => {
@@ -1849,6 +2076,7 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
 
   function recordAnswer(answerText: string, isCorrect: boolean) {
     if (selected !== null) return;
+    onInteract();
     const earned = calculateQuestionScore(question, isCorrect);
     setSelected(answerText);
     setLastCorrect(isCorrect);
@@ -1858,7 +2086,8 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
       if (question.phase === "challenge") setHardCorrect((value) => value + 1);
       else setNormalCorrect((value) => value + 1);
     }
-    setAnswers((value) => [...value, { questionId: question.id, answer: answerText, correct: isCorrect }]);
+    const savedAnswer = isAssignment && mode !== "choice" && isCorrect ? question.correctAnswer : answerText;
+    setAnswers((value) => [...value, { questionId: question.id, answer: savedAnswer, correct: isCorrect }]);
   }
 
   function chooseAnswer(option: string) {
@@ -1870,6 +2099,8 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
       ? typed.trim() !== ""
       : mode === "line"
         ? true
+        : mode === "image-select"
+          ? selectedImageOptions.length > 0
         : mode === "complete" || mode === "select"
           ? tokens.length > 0
           : false;
@@ -1890,6 +2121,10 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
       const { okExprs } = buildSelectOptions(question);
       const ok = tokens.length === okExprs.length && okExprs.every((expr) => tokens.includes(expr));
       recordAnswer(tokens.join(" | "), ok);
+    } else if (mode === "image-select") {
+      const selectedValues = question.options.filter((option) => selectedImageOptions.includes(option));
+      const answer = selectedValues.join("|");
+      recordAnswer(answer, answer === question.correctAnswer);
     }
   }
 
@@ -1899,6 +2134,7 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
     setTyped("");
     setLineValue(0);
     setTokens([]);
+    setSelectedImageOptions([]);
   }
 
   function nextQuestion() {
@@ -1922,18 +2158,10 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
       return;
     }
     if (index === normalTotal - 1) {
-      setPhaseUnlock(true);
-      return;
+      setChallengeStartedAt(seconds);
     }
     setIndex((value) => value + 1);
     resetInputs();
-  }
-
-  function unlockChallenge() {
-    setPhaseUnlock(false);
-    setIndex(normalTotal);
-    resetInputs();
-    setChallengeStartedAt(seconds);
   }
 
   const HINTS: Record<AnswerMode, string> = {
@@ -1943,16 +2171,9 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
     complete: "Chạm các ô bên dưới để tạo phép tính",
     match: "Chọn 2 ô có cùng kết quả",
     select: "Chọn tất cả các ô có kết quả bằng nhau rồi bấm Kiểm tra",
+    "image-choice": "Chọn một hình ảnh để tiếp tục",
+    "image-select": "Chọn tất cả hình ảnh đúng rồi bấm Kiểm tra",
   };
-
-  if (phaseUnlock) {
-    return (
-      <main className="phase-screen">
-        <div className="phase-confetti c1">✦</div><div className="phase-confetti c2">●</div><div className="phase-confetti c3">◆</div>
-        <section className="phase-card"><div className="unlock-ring"><Icon name="lock" size={38}/><span><Icon name="check" size={20}/></span></div><span className="eyebrow purple">HOÀN THÀNH VÒNG KHỞI ĐỘNG</span><h1>Vòng Thử thách đã mở!</h1><p>Bạn đã đi qua {normalTotal} câu thường. {challengeTotal} câu khó chiếm 40% điểm nền; bonus tối đa 100 điểm sẽ được tính theo thời gian làm phần này.</p><div className="phase-stats"><div><strong>{correct}/{normalTotal}</strong><span>Câu đúng</span></div><div><strong>{score.toLocaleString("vi-VN")}</strong><span>Điểm nền hiện tại</span></div><div><strong>+100</strong><span>Bonus tối đa</span></div></div><button className="primary-button big" onClick={unlockChallenge}>Bắt đầu thử thách <Icon name="arrow"/></button></section>
-      </main>
-    );
-  }
 
   return (
     <main className={`tt-quiz ${theme === "light" ? "light" : ""} ${question.phase === "challenge" ? "is-challenge" : ""}`}>
@@ -1998,9 +2219,9 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
           )}
           {mode !== "match" && mode !== "complete" && mode !== "select" && <QuizIllustration question={question} />}
 
-          <div className="tt-options">
-            {mode === "choice" &&
-              question.options.map((option, optionIndex) => {
+          {mode === "choice" && (
+            <div className="tt-options">
+              {question.options.map((option, optionIndex) => {
                 const isChosen = selected === option;
                 const isCorrect = option === question.correctAnswer;
                 const state = selected !== null ? (isCorrect ? "correct" : isChosen ? "wrong" : "muted") : "";
@@ -2018,7 +2239,22 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
                   </button>
                 );
               })}
-          </div>
+            </div>
+          )}
+          {(mode === "image-choice" || mode === "image-select") && (
+            <ImageChoiceAnswers
+              q={question}
+              selected={mode === "image-choice" && selected !== null ? [selected] : selectedImageOptions}
+              locked={selected !== null}
+              multi={mode === "image-select"}
+              onChoose={(option) => {
+                if (mode === "image-choice") chooseAnswer(option);
+                else setSelectedImageOptions((current) => current.includes(option)
+                  ? current.filter((value) => value !== option)
+                  : [...current, option]);
+              }}
+            />
+          )}
           {mode === "type" && <TypeInput locked={selected !== null} state={inputState} onChange={setTyped} />}
           {mode === "line" && <NumberLineInput q={question} locked={selected !== null} state={inputState} onChange={setLineValue} />}
           {mode === "complete" && <TileEquation q={question} locked={selected !== null} state={inputState} onChange={setTokens} />}
@@ -2038,7 +2274,6 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
                 <span className="tt-feedback-icon">✓</span>
                 <div>
                   <p className="tt-feedback-title">Chính xác! Tuyệt lắm!</p>
-                  <p className="tt-feedback-text">{question.explanation}</p>
                 </div>
               </div>
             )}
@@ -2049,7 +2284,6 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
                   <p className="tt-feedback-title">Gần đúng rồi!</p>
                   <p className="tt-feedback-text">
                     Đáp án đúng: <b>{question.correctAnswer}</b>
-                    {question.explanation ? ` · ${question.explanation}` : ""}
                   </p>
                 </div>
               </div>
@@ -2057,9 +2291,9 @@ function QuizExperience({ quizQuestions, onExit, onComplete, isDemo = false }: {
           </div>
           {selected !== null ? (
             <button className="tt-next" onClick={nextQuestion}>
-              {index === quizQuestions.length - 1 ? "Xem kết quả" : index === normalTotal - 1 ? "Mở vòng khó" : "Câu tiếp theo"}
+              {index === quizQuestions.length - 1 ? "Xem kết quả" : "Câu tiếp theo"}
             </button>
-          ) : mode !== "choice" && mode !== "match" ? (
+          ) : mode !== "choice" && mode !== "image-choice" && mode !== "match" ? (
             <button className="tt-next" onClick={checkInput} disabled={!canCheck}>
               Kiểm tra
             </button>

@@ -17,12 +17,71 @@ export type GenerateQuizInput = {
   count?: number;
   /** Chỉ số tổng thông minh 0–100 để cá nhân hóa độ khó */
   intelligenceScore?: number;
+  variationSeed?: string;
+  excludePrompts?: string[];
 };
 
 export type GeneratedQuiz = {
   source: "ai" | "question-bank";
   questions: QuizQuestion[];
 };
+
+type OllamaMessage = {
+  role: "system" | "user";
+  content: string;
+};
+
+type OllamaFormat = "json" | Record<string, unknown>;
+
+async function requestOllamaChat(
+  messages: OllamaMessage[],
+  temperature: number,
+  format: OllamaFormat = "json",
+): Promise<Response> {
+  const baseUrl = (process.env.OLLAMA_BASE_URL ?? "http://localhost:11434").replace(/\/+$/, "");
+  const model = process.env.OLLAMA_MODEL ?? "minicpm-v:latest";
+
+  return fetch(`${baseUrl}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model,
+      options: { temperature },
+      format,
+      stream: false,
+      messages,
+    }),
+    cache: "no-store",
+  });
+}
+
+async function parseOllamaResponse(response: Response): Promise<Record<string, unknown> | null> {
+  const payload: unknown = await response.json();
+  if (!payload || typeof payload !== "object" || !("message" in payload)) return null;
+
+  const message = payload.message;
+  if (!message || typeof message !== "object" || !("content" in message)) return null;
+
+  const content = message.content;
+  const parsed: unknown = typeof content === "string" ? JSON.parse(content) : content;
+  return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+}
+
+const VIETNAMESE_DIACRITIC_RE =
+  /[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i;
+const MATH_ONLY_PROMPT_RE = /^[\d\s()+\-−×÷=.?☐□<>]+$/u;
+
+function isVietnameseQuestionText(value: string, allowMathOnly = false) {
+  return VIETNAMESE_DIACRITIC_RE.test(value) || (allowMathOnly && MATH_ONLY_PROMPT_RE.test(value));
+}
+
+function isVietnameseAnswerOption(value: string) {
+  return (
+    !/[a-z]/i.test(value) ||
+    isVietnameseQuestionText(value) ||
+    /^[\d\s.,+-]*(?:cm|mm|m|kg|g|l|ml)$/i.test(value)
+  );
+}
 
 function fallbackQuiz(count: number): GeneratedQuiz {
   return {
@@ -36,57 +95,81 @@ function fallbackQuiz(count: number): GeneratedQuiz {
 
 /**
  * Adapter API AI duy nhất của Smart Lotus.
- * DeepSeek dùng API tương thích OpenAI. Chỉ đặt AI_API_KEY ở môi trường máy chủ.
+ * Dùng Ollama chạy trên máy chủ. Có thể cấu hình OLLAMA_BASE_URL và OLLAMA_MODEL.
  * Giao diện và route API không cần thay đổi khi đổi nhà cung cấp AI.
  */
 export async function generateQuiz(input: GenerateQuizInput): Promise<GeneratedQuiz> {
   const count = Math.max(1, Math.min(20, input.count ?? 10));
   const normalCount = Math.ceil(count / 2);
-  const apiUrl = process.env.AI_API_URL ?? "https://api.deepseek.com/chat/completions";
-  const apiKey = process.env.AI_API_KEY;
-  const model = process.env.AI_MODEL ?? "deepseek-chat";
-
-  if (!apiUrl || !apiKey) return fallbackQuiz(count);
-
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+  const quizFormat: OllamaFormat = {
+    type: "object",
+    properties: {
+      questions: {
+        type: "array",
+        minItems: count,
+        maxItems: count,
+        items: {
+          type: "object",
+          properties: {
+            id: { type: "integer" },
+            phase: { type: "string", enum: ["normal", "challenge"] },
+            difficulty: {
+              type: "string",
+              enum: input.difficulties.length ? input.difficulties : ["A", "B", "C", "D", "E"],
+            },
+            skill: { type: "string" },
+            prompt: { type: "string" },
+            options: { type: "array", items: { type: "string" }, minItems: 4, maxItems: 4 },
+            correctAnswer: { type: "string" },
+            explanation: { type: "string" },
+          },
+          required: [
+            "id",
+            "phase",
+            "difficulty",
+            "skill",
+            "prompt",
+            "options",
+            "correctAnswer",
+            "explanation",
+          ],
+          additionalProperties: false,
+        },
+      },
     },
-    body: JSON.stringify({
-      model,
-      temperature: 0.45,
-      response_format: { type: "json_object" },
-      messages: [
+    required: ["questions"],
+    additionalProperties: false,
+  };
+  const response = await requestOllamaChat(
+    [
         {
           role: "system",
           content:
-            "Bạn là chuyên gia giáo dục tiểu học Việt Nam. Hãy tạo câu hỏi Toán lớp 1 an toàn, rõ ràng, có đúng 4 lựa chọn và trả về JSON {questions: QuizQuestion[]}. Không dùng kiến thức vượt chương trình. Tạo đúng count câu: nửa đầu phase normal, nửa sau phase challenge; id từ 1 đến count; correctAnswer phải trùng một options. Câu hỏi PHẢI tự trả lời được. TUYỆT ĐỐI không tạo câu hỏi về vị trí (trên/dưới/trái/phải, 'ở đâu', 'so với'), nhận biết hình dạng/con vật, hoặc bất kỳ câu đếm số lượng nào (không dùng cụm 'Có bao nhiêu', 'có tất cả', 'đếm'); chỉ tạo câu hỏi về phép tính, so sánh và thứ tự số. Trường illustration LUÔN để chuỗi rỗng. TUYỆT ĐỐI không dùng tên file ảnh. Học sinh có chỉ số tổng thông minh intelligenceScore/100: hãy chọn độ khó của các câu sao cho phù hợp cá nhân, chỉ dùng các difficulty trong danh sách được cung cấp.",
+            "Bạn là chuyên gia giáo dục tiểu học Việt Nam. BẮT BUỘC viết 100% nội dung bằng tiếng Việt có dấu; tuyệt đối không dùng tiếng Anh ở prompt, skill, lựa chọn hoặc lời giải. Dùng đúng lối trình bày đề trắc nghiệm trong mẫu: 'Câu 1. Tính: 37 + 62 = ...' với bốn lựa chọn ngắn A, B, C, D; trong JSON, options là mảng đúng 4 chuỗi, không thêm nhãn A-D vào chuỗi. Hãy tạo câu hỏi Toán lớp 1 an toàn, rõ ràng và trả về JSON {questions: QuizQuestion[]}. Không dùng kiến thức vượt chương trình. Tạo đúng count câu: nửa đầu phase normal, nửa sau phase challenge; id từ 1 đến count; correctAnswer phải trùng một options. Mỗi lần sinh hãy tạo một bộ câu hỏi khác, không lặp lại nội dung trong excludePrompts; variationSeed dùng để tạo biến thể mới. Câu hỏi PHẢI tự trả lời được. TUYỆT ĐỐI không tạo câu hỏi về vị trí (trên/dưới/trái/phải, 'ở đâu', 'so với'), nhận biết hình dạng/con vật, hoặc bất kỳ câu đếm số lượng nào (không dùng cụm 'Có bao nhiêu', 'có tất cả', 'đếm'); chỉ tạo câu hỏi về phép tính, so sánh và thứ tự số. Trường illustration LUÔN để chuỗi rỗng. TUYỆT ĐỐI không dùng tên file ảnh. Học sinh có chỉ số tổng thông minh intelligenceScore/100: hãy chọn độ khó của các câu sao cho phù hợp cá nhân, chỉ dùng các difficulty trong danh sách được cung cấp.",
         },
         {
           role: "user",
-          content: JSON.stringify({
+          content: `Hãy tạo đề toán theo yêu cầu. Toàn bộ câu hỏi và lời giải phải viết bằng tiếng Việt. Dữ liệu đầu vào: ${JSON.stringify({
             topic: input.topic,
             curriculumLevel: input.curriculumLevel,
             difficulties: input.difficulties,
             intelligenceScore: input.intelligenceScore,
             count,
             normalCount,
+            variationSeed: input.variationSeed,
+            excludePrompts: input.excludePrompts,
             requiredFields: ["id", "phase", "difficulty", "skill", "prompt", "options", "correctAnswer", "explanation"],
-          }),
+          })}`,
         },
-      ],
-    }),
-    cache: "no-store",
-  });
+    ],
+    0.45,
+    quizFormat,
+  );
 
   if (!response.ok) return fallbackQuiz(count);
 
   try {
-    const payload = await response.json();
-    const content = payload?.choices?.[0]?.message?.content;
-    const parsed = typeof content === "string" ? JSON.parse(content) : content;
+    const parsed = await parseOllamaResponse(response);
     if (!Array.isArray(parsed?.questions) || parsed.questions.length === 0) return fallbackQuiz(count);
     const validQuestions = parsed.questions.filter(isValidQuizQuestion).slice(0, count);
     return validQuestions.length ? { source: "ai", questions: validQuestions } : fallbackQuiz(count);
@@ -103,13 +186,16 @@ function isValidQuizQuestion(value: unknown): value is QuizQuestion {
     (question.phase === "normal" || question.phase === "challenge") &&
     typeof question.difficulty === "string" &&
     typeof question.skill === "string" &&
+    isVietnameseQuestionText(question.skill) &&
     typeof question.prompt === "string" &&
+    isVietnameseQuestionText(question.prompt, true) &&
     Array.isArray(question.options) &&
     question.options.length === 4 &&
-    question.options.every((option) => typeof option === "string") &&
+    question.options.every((option) => typeof option === "string" && isVietnameseAnswerOption(option)) &&
     typeof question.correctAnswer === "string" &&
     question.options.includes(question.correctAnswer) &&
-    typeof question.explanation === "string"
+    typeof question.explanation === "string" &&
+    isVietnameseQuestionText(question.explanation)
   );
 }
 
@@ -458,12 +544,16 @@ function isValidSurveyQuestion(value: unknown): value is SurveyQuestion {
     question.level >= 1 &&
     question.level <= 6 &&
     typeof question.prompt === "string" &&
+    isVietnameseQuestionText(question.prompt, true) &&
     Array.isArray(question.options) &&
     question.options.length === 4 &&
-    question.options.every((option) => typeof option === "string") &&
+    question.options.every((option) => typeof option === "string" && isVietnameseAnswerOption(option)) &&
     typeof question.correctAnswer === "string" &&
     question.options.includes(question.correctAnswer) &&
-    typeof question.explanation === "string"
+    typeof question.explanation === "string" &&
+    isVietnameseQuestionText(question.explanation) &&
+    (question.skill === undefined ||
+      (typeof question.skill === "string" && isVietnameseQuestionText(question.skill)))
   );
 }
 
@@ -496,23 +586,8 @@ function normalizeSurveyQuestion(question: SurveyQuestion, index: number): Surve
  */
 export async function generateSurvey(input: GenerateSurveyInput = {}): Promise<GeneratedSurvey> {
   const count = Math.max(1, Math.min(30, input.count ?? 30));
-  const apiUrl = process.env.AI_API_URL ?? "https://api.deepseek.com/chat/completions";
-  const apiKey = process.env.AI_API_KEY;
-  const model = process.env.AI_MODEL ?? "deepseek-chat";
-
-  if (!apiUrl || !apiKey) return { source: "question-bank", questions: surveyFallback(count) };
-
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.7,
-      response_format: { type: "json_object" },
-      messages: [
+  const response = await requestOllamaChat(
+    [
         {
           role: "system",
           content:
@@ -533,17 +608,14 @@ export async function generateSurvey(input: GenerateSurveyInput = {}): Promise<G
             requiredFields: ["id", "level", "difficulty", "skill", "prompt", "options", "correctAnswer", "explanation"],
           }),
         },
-      ],
-    }),
-    cache: "no-store",
-  });
+    ],
+    0.7,
+  );
 
   if (!response.ok) return { source: "question-bank", questions: surveyFallback(count) };
 
   try {
-    const payload = await response.json();
-    const content = payload?.choices?.[0]?.message?.content;
-    const parsed = typeof content === "string" ? JSON.parse(content) : content;
+    const parsed = await parseOllamaResponse(response);
     if (!Array.isArray(parsed?.questions)) return { source: "question-bank", questions: surveyFallback(count) };
     const valid = parsed.questions
       .filter(isValidSurveyQuestion)
@@ -569,23 +641,8 @@ export type GeneratedVariant = {
   question: SurveyQuestion;
 };
 export async function generateSurveyVariant(question: SurveyQuestion): Promise<GeneratedVariant> {
-  const apiUrl = process.env.AI_API_URL ?? "https://api.deepseek.com/chat/completions";
-  const apiKey = process.env.AI_API_KEY;
-  const model = process.env.AI_MODEL ?? "deepseek-chat";
-
-  if (!apiUrl || !apiKey) return { source: "local", question: makeVariant(question) };
-
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.7,
-      response_format: { type: "json_object" },
-      messages: [
+  const response = await requestOllamaChat(
+    [
         {
           role: "system",
           content:
@@ -595,19 +652,22 @@ export async function generateSurveyVariant(question: SurveyQuestion): Promise<G
           role: "user",
           content: JSON.stringify({ question }),
         },
-      ],
-    }),
-    cache: "no-store",
-  });
+    ],
+    0.7,
+  );
 
   if (!response.ok) return { source: "local", question: makeVariant(question) };
 
   try {
-    const payload = await response.json();
-    const content = payload?.choices?.[0]?.message?.content;
-    const parsed = typeof content === "string" ? JSON.parse(content) : content;
+    const parsed = await parseOllamaResponse(response);
     const candidate = parsed?.question;
-    if (candidate?.level === question.level && isValidSurveyQuestion(candidate)) {
+    if (
+      candidate &&
+      typeof candidate === "object" &&
+      "level" in candidate &&
+      candidate.level === question.level &&
+      isValidSurveyQuestion(candidate)
+    ) {
       return { source: "ai", question: normalizeSurveyQuestion(candidate, question.id - 1) };
     }
     return { source: "local", question: makeVariant(question) };
@@ -668,23 +728,8 @@ function normalizeEvaluation(value: PathEvaluation, placement: PlacementResult):
  */
 export async function evaluatePathWithAI(input: EvaluatePathInput): Promise<GeneratedEvaluation> {
   const local = evaluatePathLocal(input.placement, input.attempts);
-  const apiUrl = process.env.AI_API_URL ?? "https://api.deepseek.com/chat/completions";
-  const apiKey = process.env.AI_API_KEY;
-  const model = process.env.AI_MODEL ?? "deepseek-chat";
-
-  if (!apiUrl || !apiKey) return { source: "local", evaluation: local };
-
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.35,
-      response_format: { type: "json_object" },
-      messages: [
+  const response = await requestOllamaChat(
+    [
         {
           role: "system",
           content:
@@ -694,17 +739,14 @@ export async function evaluatePathWithAI(input: EvaluatePathInput): Promise<Gene
           role: "user",
           content: JSON.stringify(input),
         },
-      ],
-    }),
-    cache: "no-store",
-  });
+    ],
+    0.35,
+  );
 
   if (!response.ok) return { source: "local", evaluation: local };
 
   try {
-    const payload = await response.json();
-    const content = payload?.choices?.[0]?.message?.content;
-    const parsed = typeof content === "string" ? JSON.parse(content) : content;
+    const parsed = await parseOllamaResponse(response);
     if (!isValidEvaluation(parsed?.evaluation)) return { source: "local", evaluation: local };
     return { source: "ai", evaluation: normalizeEvaluation(parsed.evaluation, input.placement) };
   } catch {

@@ -76,6 +76,8 @@ export default function PlacementSurvey({ questions, studentName, onExit, onComp
     complete: "Chạm các ô bên dưới để tạo phép tính",
     match: "Chọn 2 ô có cùng kết quả",
     select: "Chọn tất cả các ô có kết quả bằng nhau rồi bấm Kiểm tra",
+    "image-choice": "Chọn một hình ảnh để tiếp tục",
+    "image-select": "Chọn tất cả hình ảnh đúng rồi bấm Kiểm tra",
   };
 
   function toggleTheme() {
@@ -262,7 +264,6 @@ export default function PlacementSurvey({ questions, studentName, onExit, onComp
                 <span className="tt-feedback-icon">✓</span>
                 <div>
                   <p className="tt-feedback-title">Chính xác! Tuyệt lắm!</p>
-                  <p className="tt-feedback-text">{active.explanation}</p>
                 </div>
               </div>
             )}
@@ -291,7 +292,7 @@ export default function PlacementSurvey({ questions, studentName, onExit, onComp
                   <p className="tt-feedback-title">Bạn đã làm sai 3 lần ở câu này.</p>
                   <p className="tt-feedback-text">
                     Đáp án đúng: <b>{active.correctAnswer}</b>
-                    {active.explanation ? ` · ${active.explanation}` : ""} Khảo sát dừng lại và đánh giá ngay tại điểm này…
+                    Khảo sát dừng lại và đánh giá ngay tại điểm này…
                   </p>
                 </div>
               </div>

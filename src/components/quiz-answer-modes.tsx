@@ -1,15 +1,14 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import type { QuizQuestion } from "@/lib/learning-data";
+import type { AnswerMode, QuizQuestion } from "@/lib/learning-data";
+export type { AnswerMode } from "@/lib/learning-data";
 
 /**
  * Các cách trả lời đa dạng, mô phỏng giao diện bài làm của
  * math-ui-with-tiered-ranking: chọn đáp án / nhập đáp án / trục số /
  * ghép phép tính / nối cặp.
  */
-
-export type AnswerMode = "choice" | "type" | "line" | "complete" | "match" | "select";
 
 export const MODE_LABELS: Record<AnswerMode, string> = {
   choice: "Chọn đáp án",
@@ -18,6 +17,8 @@ export const MODE_LABELS: Record<AnswerMode, string> = {
   complete: "Ghép phép tính",
   match: "Nối cặp",
   select: "Chọn tất cả đúng",
+  "image-choice": "Chọn hình ảnh",
+  "image-select": "Chọn nhiều hình ảnh",
 };
 
 const ARITH_RE = /(-?\d+)\s*([+\-−×÷x*])\s*(-?\d+)/;
@@ -571,6 +572,50 @@ export function SelectAllOptions({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+export function ImageChoiceAnswers({
+  q,
+  selected,
+  locked,
+  multi = false,
+  onChoose,
+}: {
+  q: QuizQuestion;
+  selected: string[];
+  locked: boolean;
+  multi?: boolean;
+  onChoose: (value: string) => void;
+}) {
+  const assetById = new Map((q.imageAssets ?? []).map((asset) => [asset.id, asset]));
+  const correctAnswers = new Set(q.correctAnswer.split("|"));
+
+  return (
+    <div className={`tt-options tt-image-options${multi ? " multi" : ""}`}>
+      {q.options.map((option, index) => {
+        const asset = assetById.get(q.optionImageIds?.[index] ?? "");
+        const chosen = selected.includes(option);
+        const isCorrect = correctAnswers.has(option);
+        const state = locked
+          ? isCorrect ? "correct" : chosen ? "wrong" : "muted"
+          : chosen ? "chosen" : "";
+        return (
+          <button
+            key={option}
+            type="button"
+            className={`tt-option tt-image-option ${state}`}
+            disabled={locked}
+            onClick={() => onChoose(option)}
+          >
+            {asset && <img src={asset.src} alt={asset.name} />}
+            <strong>{option}</strong>
+            {locked && isCorrect && <span className="tt-option-badge">✓</span>}
+            {locked && chosen && !isCorrect && <span className="tt-option-badge">✕</span>}
+          </button>
+        );
+      })}
     </div>
   );
 }

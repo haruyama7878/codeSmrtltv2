@@ -30,7 +30,12 @@ export type IconName =
   | "school"
   | "wand"
   | "logout"
-  | "mail";
+  | "mail"
+  | "phone"
+  | "edit"
+  | "trash"
+  | "save"
+  | "copy";
 
 export function Icon({ name, size = 20, ...props }: { name: IconName; size?: number } & SVGProps<SVGSVGElement>) {
   const paths: Record<IconName, ReactNode> = {
@@ -64,6 +69,11 @@ export function Icon({ name, size = 20, ...props }: { name: IconName; size?: num
     wand: <><path d="m15 4 5 5L8 21l-5-5Z"/><path d="m6 14 5 5M6 3v4M4 5h4M18 15v4M16 17h4"/></>,
     logout: <><path d="M10 17l5-5-5-5M15 12H3"/><path d="M21 19V5a2 2 0 0 0-2-2h-5M14 21h5a2 2 0 0 0 2-2"/></>,
     mail: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></>,
+    phone: <path d="M5 4h3l1.5 4.5L7.5 10a12 12 0 0 0 6.5 6.5L16 14.5 20.5 16V19a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2Z"/>,
+    edit: <><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></>,
+    trash: <><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></>,
+    save: <><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></>,
+    copy: <><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></>,
   };
 
   return (

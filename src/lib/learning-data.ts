@@ -1,5 +1,8 @@
 export type Difficulty = "A" | "B" | "C" | "D" | "E";
 export type QuizPhase = "normal" | "challenge";
+export type AnswerMode = "choice" | "type" | "line" | "complete" | "match" | "select" | "image-choice" | "image-select";
+export type QuizImageAsset = { id: string; src: string; name: string };
+export type QuizVisualElement = { assetId: string; x: number; y: number; size: number };
 
 export type CurriculumLevel = {
   id: number;
@@ -23,9 +26,52 @@ export type QuizQuestion = {
   options: string[];
   correctAnswer: string;
   explanation: string;
+  answerMode?: AnswerMode;
+  imageAssets?: QuizImageAsset[];
+  visualElements?: QuizVisualElement[];
+  optionImageIds?: Array<string | null>;
 };
 
 export type SurveyQuestion = QuizQuestion & { level: number };
+
+export function isAnswerModeCompatible(question: QuizQuestion, mode: AnswerMode): boolean {
+  if (mode === "choice") return true;
+  if (mode === "image-choice" || mode === "image-select") {
+    if (question.options.length !== 4
+      || !question.optionImageIds
+      || question.optionImageIds.length !== question.options.length) return false;
+    const assetIds = new Set((question.imageAssets ?? []).map((asset) => asset.id));
+    if (question.optionImageIds.some((assetId) => !assetId || !assetIds.has(assetId))
+      || new Set(question.optionImageIds).size !== question.optionImageIds.length) return false;
+    const answers = mode === "image-select" ? question.correctAnswer.split("|") : [question.correctAnswer];
+    return answers.length > 0
+      && answers.every((answer) => question.options.includes(answer))
+      && new Set(answers).size === answers.length;
+  }
+
+  const answer = Number(question.correctAnswer.trim());
+  if (!Number.isSafeInteger(answer)) return false;
+  if (mode === "type") return Math.abs(answer) <= 999999;
+  if (answer < 0 || answer > 999) return false;
+  if (mode === "select") {
+    const arithmetic = question.prompt.match(/(\d+)\s*([+\-−×÷x*])\s*(\d+)/);
+    if (!arithmetic) return false;
+    const left = Number(arithmetic[1]);
+    const right = Number(arithmetic[3]);
+    const result = arithmetic[2] === "+" ? left + right
+      : ["×", "x", "*"].includes(arithmetic[2]) ? left * right
+        : arithmetic[2] === "÷" ? left / right
+          : left - right;
+    if (result !== answer) return false;
+  }
+  if (mode === "line") {
+    const numericOptions = question.options
+      .map((option) => Number(option.trim()))
+      .filter((option) => Number.isFinite(option) && Math.abs(option) <= 999);
+    return Math.max(5, answer, ...numericOptions) + 2 <= 20;
+  }
+  return true;
+}
 
 export const curriculum: CurriculumLevel[] = [
   {

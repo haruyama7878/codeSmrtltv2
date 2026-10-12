@@ -6,7 +6,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:seed": "node --experimental-strip-types scripts/seed-curriculum.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.6",

@@ -399,6 +399,30 @@ function ShapesScene() {
 export function QuizIllustration({ question }: { question: QuizQuestion }) {
   const prompt = question.prompt.toLowerCase();
 
+  if (question.visualElements?.length && question.imageAssets?.length) {
+    const assets = new Map(question.imageAssets.map((asset) => [asset.id, asset]));
+    return (
+      <div className="tt-illustration tt-visual-scene" aria-label="Hình ảnh minh họa cho câu hỏi">
+        {question.visualElements.map((element, index) => {
+          const asset = assets.get(element.assetId);
+          if (!asset) return null;
+          return (
+            <img
+              key={`${element.assetId}-${index}`}
+              src={asset.src}
+              alt={asset.name}
+              style={{
+                left: `${element.x}%`,
+                top: `${element.y}%`,
+                width: `${element.size}%`,
+              }}
+            />
+          );
+        })}
+      </div>
+    );
+  }
+
   // Câu hỏi vị trí (so với cây / mặt nước / hộp…) → vẽ cảnh theo đáp án đúng.
   if (/ở đâu|so với/.test(prompt)) {
     const pos = posFromAnswer(question.correctAnswer);

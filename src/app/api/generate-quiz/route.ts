@@ -30,6 +30,13 @@ export async function POST(request: Request) {
       difficulties: body.difficulties,
       count: body.count,
       intelligenceScore: typeof body.intelligenceScore === "number" ? body.intelligenceScore : undefined,
+      variationSeed: typeof body.variationSeed === "string" ? body.variationSeed.slice(0, 100) : undefined,
+      excludePrompts: Array.isArray(body.excludePrompts)
+        ? body.excludePrompts
+            .filter((prompt): prompt is string => typeof prompt === "string")
+            .slice(-40)
+            .map((prompt) => prompt.slice(0, 200))
+        : undefined,
     });
 
     return Response.json(quiz, { headers: corsHeaders });

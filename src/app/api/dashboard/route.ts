@@ -1,108 +1,69 @@
 import { db } from "@/db";
-import { quizAttempts, users } from "@/db/schema";
-import { and, desc, eq, gte, lt } from "drizzle-orm";
-import { dailyActivity } from "@/db/schema";
-import { NextRequest } from "next/server";
+import { dailyActivity, lessons, quizAttempts, users } from "@/db/schema";
+import { and, count, desc, eq, gte, lt, sql } from "drizzle-orm";
+import { getAuthenticatedSupabaseUser, getOrCreateAppUser } from "@/lib/server-user";
 
 export const dynamic = "force-dynamic";
 
-const demoProfiles = {
-  student: {
-    email: "minhanh@smartlotus.edu.vn",
-    displayName: "Nguyễn Minh Anh",
-    avatar: "MA",
-    lotusPoints: 1240,
-    currentStreak: 5,
-  },
-  teacher: {
-    email: "thuynguyen@smartlotus.edu.vn",
-    displayName: "Cô Nguyễn Thuỷ",
-    avatar: "NT",
-    lotusPoints: 0,
-    currentStreak: 12,
-  },
-  admin: {
-    email: "admin@smartlotus.edu.vn",
-    displayName: "Quản trị viên",
-    avatar: "QT",
-    lotusPoints: 0,
-    currentStreak: 28,
-  },
-} as const;
+export async function GET(request: Request) {
+  const authUser = await getAuthenticatedSupabaseUser(request);
+  if (!authUser) return Response.json({ message: "Vui lòng đăng nhập" }, { status: 401 });
 
-type Role = keyof typeof demoProfiles;
-
-async function getOrCreateDemoUser(role: Role) {
-  const profile = demoProfiles[role];
-  const [existing] = await db.select().from(users).where(eq(users.email, profile.email)).limit(1);
-  if (existing) return existing;
-
-  const [created] = await db
-    .insert(users)
-    .values({ ...profile, role })
-    .returning();
-  return created;
-}
-
-export async function GET(request: NextRequest) {
   try {
-    const requestedRole = request.nextUrl.searchParams.get("role") ?? "student";
-    const role: Role = requestedRole in demoProfiles ? (requestedRole as Role) : "student";
-    const user = await getOrCreateDemoUser(role);
+    const user = await getOrCreateAppUser(authUser);
 
     const attempts = await db
       .select()
       .from(quizAttempts)
       .where(eq(quizAttempts.userId, user.id))
       .orderBy(desc(quizAttempts.completedAt))
-      .limit(8);
+      .limit(20);
 
     const todayStart = new Date();
     todayStart.setUTCHours(0, 0, 0, 0);
-    const todayAttempts = await db
-      .select()
-      .from(quizAttempts)
-      .where(eq(quizAttempts.userId, user.id));
-    const todayActivityRows = await db
+    const [todayActivity] = await db
       .select()
       .from(dailyActivity)
-      .where(eq(dailyActivity.userId, user.id));
+      .where(and(eq(dailyActivity.userId, user.id), eq(dailyActivity.activityDate, new Date().toISOString().slice(0, 10))))
+      .limit(1);
 
-    const todayKey = new Date().toISOString().slice(0, 10);
-    const todayActivity = todayActivityRows.find((activity) => activity.activityDate === todayKey);
-    const todayCorrectAnswers = todayAttempts
-      .filter((attempt) => attempt.completedAt >= todayStart)
-      .reduce((sum, attempt) => sum + attempt.correctAnswers, 0);
-    const lowScoreAttempts = await db
-      .select({ id: quizAttempts.id })
+    const [todayStats] = await db
+      .select({
+        correct: sql<number>`coalesce(sum(${quizAttempts.correctAnswers}), 0)::int`,
+        attempts: count(),
+        accuracySum: sql<number>`coalesce(sum(round(${quizAttempts.correctAnswers} * 100.0 / nullif(${quizAttempts.totalQuestions}, 0))), 0)::int`,
+      })
       .from(quizAttempts)
-      .where(and(eq(quizAttempts.userId, user.id), eq(quizAttempts.lessonSlug, "phep-cong-trong-pham-vi-10"), lt(quizAttempts.score, 50)));
+      .where(and(eq(quizAttempts.userId, user.id), gte(quizAttempts.completedAt, todayStart)));
+    const lowScoreAttempts = await db
+      .select({ value: count() })
+      .from(quizAttempts)
+      .where(and(eq(quizAttempts.userId, user.id), lt(quizAttempts.score, 50)));
 
     const weekStart = new Date();
     weekStart.setUTCHours(0, 0, 0, 0);
     weekStart.setUTCDate(weekStart.getUTCDate() - 6);
     const weeklyRows = await db
-      .select({ userId: users.id, name: users.displayName, avatar: users.avatar, points: dailyActivity.pointsEarned })
+      .select({ userId: dailyActivity.userId, name: users.displayName, avatar: users.avatar, points: sql<number>`sum(${dailyActivity.pointsEarned})::int` })
       .from(dailyActivity)
       .innerJoin(users, eq(dailyActivity.userId, users.id))
-      .where(gte(dailyActivity.activityDate, weekStart.toISOString().slice(0, 10)));
-    const weeklyTotals = new Map<number, { name: string; avatar: string; points: number }>();
-    for (const row of weeklyRows) {
-      const current = weeklyTotals.get(row.userId);
-      weeklyTotals.set(row.userId, { name: row.name, avatar: row.avatar, points: (current?.points ?? 0) + row.points });
-    }
-    if (!weeklyTotals.has(user.id)) weeklyTotals.set(user.id, { name: user.displayName, avatar: user.avatar, points: 0 });
-    const weeklyLeaderboard = [...weeklyTotals.entries()]
-      .map(([userId, profile]) => ({ ...profile, isCurrentUser: userId === user.id }))
+      .where(gte(dailyActivity.activityDate, weekStart.toISOString().slice(0, 10)))
+      .groupBy(dailyActivity.userId, users.displayName, users.avatar);
+    const weeklyLeaderboard = weeklyRows
+      .map((row) => ({ name: row.name, avatar: row.avatar, points: row.points, isCurrentUser: row.userId === user.id }))
       .sort((left, right) => right.points - left.points)
       .slice(0, 10);
 
-    const averageScore = attempts.length
-      ? Math.round(attempts.reduce((sum, attempt) => sum + attempt.correctAnswers * 10, 0) / attempts.length)
-      : 86;
-    const learningMinutes = attempts.length
-      ? Math.max(1, Math.round(attempts.reduce((sum, attempt) => sum + attempt.durationSeconds, 0) / 60))
-      : 42;
+    const [lessonStats] = await db.select({ total: count(), completed: sql<number>`count(distinct ${quizAttempts.lessonSlug})::int` })
+      .from(lessons)
+      .leftJoin(quizAttempts, and(eq(quizAttempts.lessonSlug, lessons.slug), eq(quizAttempts.userId, user.id)))
+      .where(eq(lessons.published, true));
+    const [scoreStats] = await db.select({ average: sql<number>`coalesce(round(avg(${quizAttempts.correctAnswers} * 100.0 / nullif(${quizAttempts.totalQuestions}, 0))), 0)::int` })
+      .from(quizAttempts)
+      .where(eq(quizAttempts.userId, user.id));
+    const [minutesStats] = await db.select({ minutes: sql<number>`coalesce(sum(${dailyActivity.minutesLearned}), 0)::int` })
+      .from(dailyActivity)
+      .where(eq(dailyActivity.userId, user.id));
 
     return Response.json({
       user: {
@@ -111,24 +72,36 @@ export async function GET(request: NextRequest) {
         email: user.email,
         role: user.role,
         avatar: user.avatar,
+        avatarUrl: user.avatarUrl ?? undefined,
         lotusPoints: user.lotusPoints,
         currentStreak: user.currentStreak,
       },
       stats: {
-        completedLessons: 14 + attempts.length,
-        totalLessons: 40,
-        averageScore,
-        learningMinutes,
+        completedLessons: lessonStats.completed,
+        totalLessons: lessonStats.total,
+        averageScore: scoreStats.average,
+        learningMinutes: minutesStats.minutes,
       },
       todayActivity: {
         minutesLearned: todayActivity?.minutesLearned ?? 0,
         lessonsCompleted: todayActivity?.lessonsCompleted ?? 0,
         pointsEarned: todayActivity?.pointsEarned ?? 0,
-        correctAnswers: todayCorrectAnswers,
+        correctAnswers: todayStats.correct,
+        attempts: todayStats.attempts,
+        accuracySum: todayStats.accuracySum,
       },
       weeklyLeaderboard,
-      lowScoreAttempts: lowScoreAttempts.length,
-      recentAttempts: attempts.map((attempt) => ({
+      lowScoreAttempts: lowScoreAttempts[0]?.value ?? 0,
+      placement: user.placement ?? null,
+      attemptHistory: attempts.map((attempt) => ({
+        lessonSlug: attempt.lessonSlug,
+        correctAnswers: attempt.correctAnswers,
+        totalQuestions: attempt.totalQuestions,
+        score: attempt.score,
+        durationSeconds: attempt.durationSeconds,
+        completedAt: attempt.completedAt.toISOString(),
+      })),
+      recentAttempts: attempts.slice(0, 8).map((attempt) => ({
         id: attempt.id,
         lessonSlug: attempt.lessonSlug,
         score: attempt.score,
