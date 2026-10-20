@@ -45,7 +45,7 @@ export const users = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [uniqueIndex("users_email_idx").on(table.email)],
-);
+).enableRLS();
 
 export const lessons = pgTable(
   "lessons",
@@ -61,13 +61,14 @@ export const lessons = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [uniqueIndex("lessons_slug_idx").on(table.slug)],
-);
+).enableRLS();
 
 export const quizAttempts = pgTable("quiz_attempts", {
   id: serial("id").primaryKey(),
   userId: integer("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
+  lessonId: integer("lesson_id").references(() => lessons.id, { onDelete: "set null" }),
   lessonSlug: varchar("lesson_slug", { length: 120 }).notNull(),
   correctAnswers: integer("correct_answers").notNull(),
   totalQuestions: integer("total_questions").notNull().default(10),
@@ -76,7 +77,7 @@ export const quizAttempts = pgTable("quiz_attempts", {
   highestDifficulty: difficultyEnum("highest_difficulty").notNull(),
   answers: jsonb("answers").$type<Array<{ questionId: number; answer: string; correct: boolean }>>().notNull(),
   completedAt: timestamp("completed_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => [index("quiz_attempts_lesson_id_idx").on(table.lessonId)]).enableRLS();
 
 export const classrooms = pgTable(
   "classrooms",
@@ -94,7 +95,7 @@ export const classrooms = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [uniqueIndex("classrooms_teacher_label_idx").on(table.teacherId, table.label)],
-);
+).enableRLS();
 
 export const classroomMemberships = pgTable(
   "classroom_memberships",
@@ -109,7 +110,7 @@ export const classroomMemberships = pgTable(
     joinedAt: timestamp("joined_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [uniqueIndex("classroom_memberships_class_student_idx").on(table.classroomId, table.studentId)],
-);
+).enableRLS();
 
 export const classroomInvitations = pgTable(
   "classroom_invitations",
@@ -126,7 +127,7 @@ export const classroomInvitations = pgTable(
     respondedAt: timestamp("responded_at", { withTimezone: true }),
   },
   (table) => [uniqueIndex("classroom_invitations_class_student_idx").on(table.classroomId, table.studentId)],
-);
+).enableRLS();
 
 export const classroomAssignments = pgTable("classroom_assignments", {
   id: serial("id").primaryKey(),
@@ -140,7 +141,7 @@ export const classroomAssignments = pgTable("classroom_assignments", {
   durationMinutes: integer("duration_minutes").notNull(),
   questions: jsonb("questions").$type<import("@/lib/learning-data").QuizQuestion[]>().notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}).enableRLS();
 
 export const assignmentProjects = pgTable(
   "assignment_projects",
@@ -157,7 +158,7 @@ export const assignmentProjects = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index("assignment_projects_teacher_name_idx").on(table.teacherId, table.name)],
-);
+).enableRLS();
 
 export const assignmentSubmissions = pgTable(
   "assignment_submissions",
@@ -177,7 +178,7 @@ export const assignmentSubmissions = pgTable(
     submittedAt: timestamp("submitted_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [uniqueIndex("assignment_submissions_assignment_student_idx").on(table.assignmentId, table.studentId)],
-);
+).enableRLS();
 
 export const dailyActivity = pgTable(
   "daily_activity",
@@ -192,7 +193,7 @@ export const dailyActivity = pgTable(
     pointsEarned: integer("points_earned").notNull().default(0),
   },
   (table) => [uniqueIndex("daily_activity_user_date_idx").on(table.userId, table.activityDate)],
-);
+).enableRLS();
 
 export type User = typeof users.$inferSelect;
 export type Lesson = typeof lessons.$inferSelect;

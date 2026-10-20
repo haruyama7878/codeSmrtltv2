@@ -1,5 +1,5 @@
 import { db } from "@/db";
-import { dailyActivity, quizAttempts, users } from "@/db/schema";
+import { dailyActivity, lessons, quizAttempts, users } from "@/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { getAuthenticatedSupabaseUser, getOrCreateAppUser } from "@/lib/server-user";
 
@@ -40,9 +40,18 @@ export async function POST(request: Request) {
     }
 
     const student = await getOrCreateAppUser(authUser);
+    const [lesson] = await db
+      .select({ id: lessons.id, questionCount: lessons.questionCount })
+      .from(lessons)
+      .where(and(eq(lessons.slug, body.lessonSlug), eq(lessons.published, true)))
+      .limit(1);
+    if (!lesson) {
+      return Response.json({ message: "Bài học không tồn tại hoặc chưa được xuất bản" }, { status: 404 });
+    }
+
     const safeScore = Math.max(0, Math.min(1750, Math.round(body.score)));
     const safeDuration = Math.max(1, Math.min(3600, Math.round(body.durationSeconds)));
-    const totalQuestions = Math.max(1, Math.min(20, Math.round(body.totalQuestions)));
+    const totalQuestions = Math.max(1, Math.min(lesson.questionCount, Math.round(body.totalQuestions)));
     const safeCorrect = Math.max(0, Math.min(totalQuestions, Math.round(body.correctAnswers)));
     const minutesLearned = learnedMinutes(safeDuration, totalQuestions);
     const today = new Date().toISOString().slice(0, 10);
@@ -51,6 +60,7 @@ export async function POST(request: Request) {
         .insert(quizAttempts)
         .values({
           userId: student.id,
+          lessonId: lesson.id,
           lessonSlug: body.lessonSlug,
           correctAnswers: safeCorrect,
           totalQuestions,

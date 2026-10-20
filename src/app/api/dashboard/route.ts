@@ -1,6 +1,6 @@
 import { db } from "@/db";
 import { dailyActivity, lessons, quizAttempts, users } from "@/db/schema";
-import { and, count, desc, eq, gte, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, lt, or, sql } from "drizzle-orm";
 import { getAuthenticatedSupabaseUser, getOrCreateAppUser } from "@/lib/server-user";
 
 export const dynamic = "force-dynamic";
@@ -56,7 +56,13 @@ export async function GET(request: Request) {
 
     const [lessonStats] = await db.select({ total: count(), completed: sql<number>`count(distinct ${quizAttempts.lessonSlug})::int` })
       .from(lessons)
-      .leftJoin(quizAttempts, and(eq(quizAttempts.lessonSlug, lessons.slug), eq(quizAttempts.userId, user.id)))
+      .leftJoin(
+        quizAttempts,
+        and(
+          eq(quizAttempts.userId, user.id),
+          or(eq(quizAttempts.lessonId, lessons.id), eq(quizAttempts.lessonSlug, lessons.slug)),
+        ),
+      )
       .where(eq(lessons.published, true));
     const [scoreStats] = await db.select({ average: sql<number>`coalesce(round(avg(${quizAttempts.correctAnswers} * 100.0 / nullif(${quizAttempts.totalQuestions}, 0))), 0)::int` })
       .from(quizAttempts)

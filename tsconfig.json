@@ -38,6 +38,7 @@
   ],
   "exclude": [
     "node_modules",
+    "rrr_admin",
     "build-game-level-map",
     "ui_game_level",
     "math-interface-with-ranking"

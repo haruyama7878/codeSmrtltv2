@@ -5,7 +5,7 @@ import { Icon, type IconName, LotusLogo, LotusMascot } from "./icons";
 import { curriculum, difficultyMeta, questions, type QuizQuestion, type SurveyQuestion } from "@/lib/learning-data";
 import { adminMetrics } from "@/lib/role-data";
 import { calculateQuestionScore, calculateQuizScore, formatDuration } from "@/lib/scoring";
-import { smartLotusApi, type AttemptPayload, type DashboardData, type Role } from "@/lib/api";
+import { smartLotusApi, type AttemptPayload, type ClassroomInvitation, type DashboardData, type LessonRecord, type Role } from "@/lib/api";
 import { supabase } from "@/lib/supabase";
 import {
   answerModeFor,
@@ -33,6 +33,7 @@ import type { Assignment } from "@/lib/assignment-data";
 
 type StudentView = "home" | "classrooms" | "exercises" | "roadmap" | "compete" | "achievements";
 type TeacherView = "overview" | "classes" | "assignments";
+type AdminView = "overview" | "users" | "content" | "data" | "config";
 type Screen = "app" | "quiz" | "result" | "survey" | "guide";
 type AuthMode = "login" | "register";
 type QuizMode = "journey" | "review" | "demo" | "assignment";
@@ -279,8 +280,10 @@ export default function SmartLotusApp() {
   const [authenticated, setAuthenticated] = useState(false);
   const [view, setView] = useState<StudentView>("home");
   const [teacherView, setTeacherView] = useState<TeacherView>("overview");
+  const [adminView, setAdminView] = useState<AdminView>("overview");
   const [screen, setScreen] = useState<Screen>("app");
   const [dashboard, setDashboard] = useState<DashboardData>(fallbackDashboard);
+  const [lessonCatalog, setLessonCatalog] = useState<LessonRecord[] | null>(null);
   const [quizQuestions, setQuizQuestions] = useState<QuizQuestion[]>(questions);
   const quizGenerationId = useRef(0);
   const quizInteracted = useRef(false);
@@ -307,6 +310,8 @@ export default function SmartLotusApp() {
   });
   const [result, setResult] = useState<QuizResult | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [classroomInvitations, setClassroomInvitations] = useState<ClassroomInvitation[]>([]);
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [toast, setToast] = useState("");
@@ -323,12 +328,34 @@ export default function SmartLotusApp() {
 
   useEffect(() => {
     if (!authenticated || role !== "student") return;
+
+    let active = true;
+    void smartLotusApi.getLessons()
+      .then(({ lessons: publishedLessons }) => {
+        if (active) setLessonCatalog(publishedLessons);
+      })
+      .catch((error: unknown) => {
+        console.error("Load lesson catalog error", error);
+        if (active) {
+          setLessonCatalog(null);
+          setToast("Không thể tải danh sách bài học. Hãy kiểm tra kết nối rồi thử lại.");
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [authenticated, role]);
+
+  useEffect(() => {
+    if (!authenticated || role !== "student") return;
     let active = true;
     knownClassroomInvitations.current = new Set();
     const checkInvitations = async () => {
       try {
         const { invitations } = await smartLotusApi.getClassroomInvitations();
         if (!active) return;
+        setClassroomInvitations(invitations);
         if (invitations.some((invitation) => !knownClassroomInvitations.current.has(invitation.id))) {
           setToast("Bạn có lời mời vào lớp mới. Mở mục Lớp học để phản hồi.");
         }
@@ -468,6 +495,7 @@ export default function SmartLotusApp() {
   async function signOut() {
     await supabase.auth.signOut();
     setAuthenticated(false);
+    setLessonCatalog(null);
     setProfileOpen(false);
     setToast("Bạn đã đăng xuất khỏi Smart Lotus");
   }
@@ -716,13 +744,33 @@ export default function SmartLotusApp() {
       setView("exercises");
       return;
     }
+    const selectedLesson = lessonNumber ? lessonForMapPad(lessonNumber) : currentLesson();
+    let catalog = lessonCatalog;
+    if (!catalog) {
+      try {
+        ({ lessons: catalog } = await smartLotusApi.getLessons());
+        setLessonCatalog(catalog);
+      } catch (error) {
+        console.error("Load lesson before starting quiz error", error);
+        setToast("Không thể tải danh sách bài học. Hãy kiểm tra kết nối rồi thử lại.");
+        return;
+      }
+    }
+    const lesson = catalog.find((entry) =>
+      entry.slug === `level-${selectedLesson.level}-${slugifyLesson(selectedLesson.lessonTitle)}`,
+    );
+    if (!lesson) {
+      setToast("Bài học này chưa có trong danh mục đã xuất bản. Hãy liên hệ giáo viên hoặc quản trị viên.");
+      return;
+    }
+
+    const questionCount = Math.max(1, Math.min(20, lesson.questionCount));
     setQuizMode(mode);
     setJourneyFailed(false);
     setSkipEligible(false);
-    const lesson = lessonNumber ? lessonForMapPad(lessonNumber) : currentLesson();
-    setQuizLesson({ level: lesson.level, lessonTitle: lesson.lessonTitle });
+    setQuizLesson({ level: lesson.curriculumLevel, lessonTitle: lesson.title });
     const isJourney = mode === "journey";
-    const topic = isJourney ? `${lesson.lessonTitle} — ${lesson.levelMeta.title}` : `Ôn tập — ${lesson.lessonTitle}`;
+    const topic = isJourney ? lesson.topic : `Ôn tập — ${lesson.topic}`;
     const intelligenceScore = evaluation?.intelligenceScore ?? 50;
     let difficulties: Array<"A" | "B" | "C" | "D" | "E">;
     if (!isJourney) {
@@ -738,7 +786,7 @@ export default function SmartLotusApp() {
     quizInteracted.current = false;
     const questionBank = FILTERED_BANK.length ? FILTERED_BANK : questions;
     const excludePrompts = [...seenQuizPrompts.current].slice(-40);
-    const fallbackQuestions = makeFreshFallbackQuestions(questionBank, seenQuizPrompts.current, 10);
+    const fallbackQuestions = makeFreshFallbackQuestions(questionBank, seenQuizPrompts.current, questionCount);
     fallbackQuestions.forEach((question) => seenQuizPrompts.current.add(questionPromptKey(question.prompt)));
     setQuizQuestions(fallbackQuestions);
     setScreen("quiz");
@@ -748,9 +796,9 @@ export default function SmartLotusApp() {
       try {
       const generated = await smartLotusApi.generateQuiz({
         topic,
-        curriculumLevel: lesson.level,
+        curriculumLevel: lesson.curriculumLevel,
         difficulties,
-        count: 10,
+        count: questionCount,
         intelligenceScore,
         variationSeed: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         excludePrompts,
@@ -761,25 +809,25 @@ export default function SmartLotusApp() {
         const key = questionPromptKey(question.prompt);
         if (!seenQuizPrompts.current.has(key) && !uniqueQuestions.has(key)) uniqueQuestions.set(key, question);
       });
-      const aiQuestions = [...uniqueQuestions.values()].slice(0, 10);
+      const aiQuestions = [...uniqueQuestions.values()].slice(0, questionCount);
       const selectedPrompts = new Set([...seenQuizPrompts.current, ...aiQuestions.map((question) => questionPromptKey(question.prompt))]);
-      const fallbackFill = makeFreshFallbackQuestions(questionBank, selectedPrompts, 10 - aiQuestions.length);
+      const fallbackFill = makeFreshFallbackQuestions(questionBank, selectedPrompts, questionCount - aiQuestions.length);
       const finalQuestions = [...aiQuestions, ...fallbackFill].map((question, index) => ({ ...question, id: index + 1 }));
-      if (finalQuestions.length === 10) {
+      if (finalQuestions.length === questionCount) {
         finalQuestions.forEach((question) => seenQuizPrompts.current.add(questionPromptKey(question.prompt)));
         setQuizQuestions(finalQuestions);
       }
       setToast(
-        generated.source === "ai" && aiQuestions.length === 10
+        generated.source === "ai" && aiQuestions.length === questionCount
           ? isJourney
             ? attemptMode === "hard"
-              ? `Đã tạo đề bàn khó cho "${lesson.lessonTitle}" bằng Ollama`
+              ? `Đã tạo đề bàn khó cho "${lesson.title}" bằng Ollama`
               : attemptMode === "retry"
-                ? `Đã tạo đề làm lại "${lesson.lessonTitle}" bằng Ollama`
-                : `Đã tạo đề "${lesson.lessonTitle}" (chỉ số ${intelligenceScore}/100) bằng Ollama`
-            : "Đã tạo đề ôn tập 10 câu bằng Ollama"
+                ? `Đã tạo đề làm lại "${lesson.title}" bằng Ollama`
+                : `Đã tạo đề "${lesson.title}" (chỉ số ${intelligenceScore}/100) bằng Ollama`
+            : `Đã tạo đề ôn tập ${questionCount} câu bằng Ollama`
           : generated.source === "ai"
-            ? `AI chỉ tạo được ${aiQuestions.length}/10 câu; đã bổ sung câu hỏi có sẵn`
+            ? `AI chỉ tạo được ${aiQuestions.length}/${questionCount} câu; đã bổ sung câu hỏi có sẵn`
             : "AI chưa tạo được đề hợp lệ; đang dùng câu hỏi có sẵn"
       );
       } catch {
@@ -879,7 +927,7 @@ export default function SmartLotusApp() {
   }
 
   if (screen === "guide") {
-    return <OnboardingGuide studentName={greetingName} onStart={() => void beginSurvey()} />;
+    return <OnboardingGuide onStart={() => void beginSurvey()} />;
   }
 
   if (screen === "survey" && surveyQuestions) {
@@ -997,11 +1045,11 @@ export default function SmartLotusApp() {
             </>
           ) : (
             <>
-              <button className="nav-item active"><Icon name="chart" /><span>Tổng quan</span></button>
-              <button className="nav-item"><Icon name="users" /><span>Người dùng</span></button>
-              <button className="nav-item"><Icon name="book" /><span>Nội dung</span></button>
-              <button className="nav-item"><Icon name="database" /><span>Dữ liệu</span></button>
-              <button className="nav-item"><Icon name="settings" /><span>Cấu hình</span></button>
+              <button className={`nav-item ${adminView === "overview" ? "active" : ""}`} onClick={() => { setAdminView("overview"); setMobileOpen(false); }}><Icon name="chart" /><span>Tổng quan</span></button>
+              <button className={`nav-item ${adminView === "users" ? "active" : ""}`} onClick={() => { setAdminView("users"); setMobileOpen(false); }}><Icon name="users" /><span>Người dùng</span></button>
+              <button className={`nav-item ${adminView === "content" ? "active" : ""}`} onClick={() => { setAdminView("content"); setMobileOpen(false); }}><Icon name="book" /><span>Nội dung</span></button>
+              <button className={`nav-item ${adminView === "data" ? "active" : ""}`} onClick={() => { setAdminView("data"); setMobileOpen(false); }}><Icon name="database" /><span>Dữ liệu</span></button>
+              <button className={`nav-item ${adminView === "config" ? "active" : ""}`} onClick={() => { setAdminView("config"); setMobileOpen(false); }}><Icon name="settings" /><span>Cấu hình</span></button>
             </>
           )}
         </nav>
@@ -1049,7 +1097,59 @@ export default function SmartLotusApp() {
                 <button className="points-pill" onClick={() => setView("achievements")} aria-label="Xem điểm sen và thành tích"><span style={{ fontSize: 15 }}>🌸</span><strong>{dashboard.user.lotusPoints.toLocaleString("vi-VN")}</strong><span>điểm sen</span></button>
               </>
             )}
-            <button className="icon-button notification-button" aria-label={role === "student" ? "Xem lời mời vào lớp" : "Thông báo"} onClick={() => { if (role === "student") setView("classrooms"); }}><Icon name="bell" /><span /></button>
+            <div className="notification-wrap">
+              <button
+                className="icon-button notification-button"
+                aria-label={role === "student" ? "Thông báo lời mời vào lớp" : "Thông báo"}
+                aria-expanded={notificationsOpen}
+                aria-haspopup="dialog"
+                onClick={() => {
+                  setNotificationsOpen((open) => !open);
+                  setProfileOpen(false);
+                }}
+              >
+                <Icon name="bell" />
+                {role === "student" && classroomInvitations.length > 0 && <span />}
+              </button>
+              {notificationsOpen && (
+                <div className="notification-panel" role="dialog" aria-label="Thông báo">
+                  <div className="notification-panel-head">
+                    <strong>Thông báo</strong>
+                    {role === "student" && classroomInvitations.length > 0 && (
+                      <span>{classroomInvitations.length} mới</span>
+                    )}
+                  </div>
+                  {role === "student" && classroomInvitations.length > 0 ? (
+                    <div className="notification-list">
+                      {classroomInvitations.map((invitation) => (
+                        <button
+                          className="notification-item unread"
+                          key={invitation.id}
+                          onClick={() => {
+                            setView("classrooms");
+                            setNotificationsOpen(false);
+                          }}
+                        >
+                          <i className="notification-item-dot" />
+                          <span className="notification-item-copy">
+                            <strong>Mời tham gia {invitation.classroomName}</strong>
+                            <small>{invitation.teacherName} · {invitation.subject}</small>
+                            <time dateTime={invitation.createdAt}>
+                              {new Intl.DateTimeFormat("vi-VN", { day: "numeric", month: "short" }).format(new Date(invitation.createdAt))}
+                            </time>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="notification-empty">
+                      <Icon name="bell" size={22} />
+                      <p>Hiện chưa có thông báo mới.</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             <div className="profile-wrap">
               <button className="profile-button" onClick={() => setProfileOpen((open) => !open)} aria-expanded={profileOpen}>
                 {dashboard.user.avatarUrl ? <img className="avatar avatar-image" src={dashboard.user.avatarUrl} alt="Avatar" /> : <span className="avatar">{dashboard.user.avatar}</span>}
@@ -1087,7 +1187,7 @@ export default function SmartLotusApp() {
               <AssignmentBuilder onBack={() => setTeacherView("overview")} onToast={setToast} />
             )
           ) : (
-            <AdminDashboard />
+            <AdminDashboard activeView={adminView} />
           )}
         </main>
       </div>
@@ -1130,8 +1230,8 @@ function ProfileEditor({ user, onClose, onSaved }: { user: DashboardData["user"]
       return;
     }
     const normalizedEmail = email.trim().toLowerCase();
-    if (!/^[^\s@]+@gmail\.com$/i.test(normalizedEmail)) {
-      setError("Email phải là địa chỉ Gmail hợp lệ, ví dụ: ban@gmail.com.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      setError("Địa chỉ email không hợp lệ.");
       return;
     }
     const emailChanged = normalizedEmail !== user.email.toLowerCase();
@@ -1163,8 +1263,8 @@ function ProfileEditor({ user, onClose, onSaved }: { user: DashboardData["user"]
 
   async function sendEmailVerification() {
     const normalizedEmail = email.trim().toLowerCase();
-    if (!/^[^\s@]+@gmail\.com$/i.test(normalizedEmail)) {
-      setError("Email phải là địa chỉ Gmail hợp lệ, ví dụ: ban@gmail.com.");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      setError("Địa chỉ email không hợp lệ.");
       return;
     }
     if (normalizedEmail === user.email.toLowerCase()) {
@@ -1180,7 +1280,7 @@ function ProfileEditor({ user, onClose, onSaved }: { user: DashboardData["user"]
       setError("Không thể gửi email xác minh. Hãy kiểm tra email hoặc thử lại sau.");
       return;
     }
-    setVerificationNotice("Đã gửi thư xác minh. Hãy bấm đường link trong Gmail, sau đó tải lại trang.");
+    setVerificationNotice("Đã gửi thư xác minh. Hãy bấm đường link trong email, sau đó tải lại trang.");
   }
 
   return (
@@ -1289,8 +1389,8 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
     return "student";
   }
 
-  function isValidGmail(value: string) {
-    return /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@gmail\.com$/i.test(value.trim());
+  function isValidEmail(value: string) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
   }
 
   function isValidPassword(value: string) {
@@ -1310,14 +1410,14 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
     if (normalized.includes("password should be at least") || normalized.includes("password must")) return "Mật khẩu cần ít nhất 9 ký tự, gồm chữ cái và số.";
     if (normalized.includes("invalid email")) return "Địa chỉ email không hợp lệ.";
     if (normalized.includes("rate limit") || normalized.includes("too many")) return "Bạn thao tác quá nhiều lần. Vui lòng thử lại sau ít phút.";
-    if (normalized.includes("internal server error") || normalized.includes("status 500")) return "Máy chủ xác thực trả lỗi 500 (Internal Server Error). Nếu dùng SSH tunnel, hãy kiểm tra tunnel tới 127.0.0.1:30800 đang chạy (chạy deploy-k8s/tunnel.ps1).";
+    if (normalized.includes("internal server error") || normalized.includes("status 500")) return "Máy chủ Supabase Auth trả lỗi 500. Hãy kiểm tra cấu hình URL và trạng thái dịch vụ của project Supabase.";
     return `Supabase từ chối yêu cầu: ${message}`;
   }
 
   async function recoverPassword() {
     const normalizedEmail = email.trim().toLowerCase();
-    if (!isValidGmail(normalizedEmail)) {
-      setError("Nhập đúng địa chỉ Gmail để nhận liên kết khôi phục.");
+    if (!isValidEmail(normalizedEmail)) {
+      setError("Nhập địa chỉ email hợp lệ để nhận liên kết khôi phục.");
       emailInputRef.current?.focus();
       return;
     }
@@ -1331,7 +1431,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
       setError(getAuthErrorMessage(recoveryError.message));
       return;
     }
-    setNotice("Nếu Gmail này có tài khoản, liên kết khôi phục đã được gửi. Hãy kiểm tra hộp thư.");
+    setNotice("Nếu email này có tài khoản, liên kết khôi phục đã được gửi. Hãy kiểm tra hộp thư.");
   }
 
   async function continueWithFacebook() {
@@ -1366,8 +1466,8 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
       setError(mode === "login" ? "Vui lòng nhập email và mật khẩu." : "Vui lòng điền đầy đủ thông tin đăng ký.");
       return;
     }
-    if (!isValidGmail(email)) {
-      setError("Vui lòng nhập đúng địa chỉ Gmail, ví dụ: ban@gmail.com.");
+    if (!isValidEmail(email)) {
+      setError("Vui lòng nhập địa chỉ email hợp lệ, ví dụ: ban@example.com.");
       return;
     }
     if (mode === "register") {
@@ -1418,7 +1518,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
         if (signUpError) throw signUpError;
         if (!data.session) {
           if (selectedRole === "student") window.localStorage.setItem("smart-lotus-pending-survey", "1");
-          setNotice("Gmail này có thể đã đăng ký hoặc đang chờ xác minh. Hãy kiểm tra hộp thư hoặc đăng nhập.");
+          setNotice("Email này có thể đã đăng ký hoặc đang chờ xác minh. Hãy kiểm tra hộp thư hoặc đăng nhập.");
           setShowRecovery(true);
           setMode("login");
           setPassword("");
@@ -1552,33 +1652,23 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (role: Role, firstNa
   );
 }
 
-function OnboardingGuide({ studentName, onStart }: { studentName: string; onStart: () => void }) {
-  const steps = [
-    { icon: "📝", title: "Khảo sát đầu vào", text: "Làm 30 câu để hệ thống đo chỉ số thông minh và chọn điểm bắt đầu phù hợp." },
-    { icon: "🐸", title: "Hành trình ếch xanh", text: "Chinh phục 100 bài chia 6 chương theo lộ trình. Bấm lá sen hiện tại để làm bài." },
-    { icon: "📚", title: "Ôn tập khi cần", text: "Chỉ số thấp thì vào Ôn tập để lấy lại điểm, đạt 50/100 là mở lại hành trình." },
-    { icon: "🌸", title: "Điểm sen và chuỗi ngày", text: "Làm bài kiếm điểm sen, giữ chuỗi ngày học để chỉ số thông minh tăng thêm ở mốc 5, 10, 15 ngày." },
-  ];
+function OnboardingGuide({ onStart }: { onStart: () => void }) {
   return (
     <main className="phase-screen">
       <div className="phase-confetti c1">✦</div><div className="phase-confetti c2">●</div><div className="phase-confetti c3">◆</div>
       <section className="phase-card" style={{ maxWidth: 680 }}>
-        <span className="eyebrow purple">CHÀO MỪNG {studentName.toUpperCase()}!</span>
-        <h1 style={{ marginTop: 8 }}>Hướng dẫn nhanh Smart Lotus 🎉</h1>
-        <p>Chỉ cần vài bước là bạn đã sẵn sàng chinh phục dòng sông tri thức.</p>
-        <div style={{ margin: "24px 0", display: "flex", flexDirection: "column", gap: 12, textAlign: "left" }}>
-          {steps.map((step, index) => (
-            <div key={step.title} style={{ display: "flex", gap: 13, alignItems: "flex-start", padding: "13px 15px", borderRadius: 14, background: "#f8f5ff", border: "1px solid #eae1fb" }}>
-              <span style={{ fontSize: 24, lineHeight: 1 }}>{step.icon}</span>
-              <div>
-                <strong style={{ fontSize: 13 }}>{index + 1}. {step.title}</strong>
-                <p style={{ margin: "4px 0 0", color: "#817a8b", fontSize: 11, lineHeight: 1.55 }}>{step.text}</p>
-              </div>
-            </div>
-          ))}
+        <span className="eyebrow purple">KHẢO SÁT ĐẦU VÀO</span>
+        <h1 style={{ marginTop: 8 }}>Hướng dẫn khảo sát 30 câu</h1>
+        <p>Khảo sát giúp chọn bài học bắt đầu phù hợp với khả năng hiện tại của bạn.</p>
+        <div style={{ margin: "24px 0", padding: "18px 20px", borderRadius: 14, background: "#f8f5ff", border: "1px solid #eae1fb", textAlign: "left" }}>
+          <strong style={{ fontSize: 14 }}>Cách thực hiện</strong>
+          <ul style={{ margin: "10px 0 0", paddingLeft: 20, color: "#6f6879", fontSize: 13, lineHeight: 1.8 }}>
+            <li>Khảo sát có tối đa 30 câu. Trả lời lần lượt theo hướng dẫn hiển thị ở mỗi câu.</li>
+            <li>Tùy dạng bài, bạn có thể chọn đáp án, nhập câu trả lời, kéo trên trục số hoặc ghép các ô.</li>
+            <li>Nếu trả lời sai, bạn có thể thử một câu tương tự tối đa 2 lần. Sai 3 lần ở một câu sẽ kết thúc khảo sát; hệ thống dùng kết quả đã làm để đề xuất điểm bắt đầu.</li>
+          </ul>
         </div>
         <button className="primary-button big" onClick={onStart}><Icon name="play" size={18} /> Bắt đầu khảo sát đầu vào <Icon name="arrow" size={17} /></button>
-        <p style={{ margin: "14px 0 0", color: "#9b94a2", fontSize: 9.5 }}>Khảo sát gồm 30 câu · có thể làm lại câu tương tự khi sai</p>
       </section>
     </main>
   );
@@ -1854,22 +1944,18 @@ function ExerciseMapView({ onStartQuiz, onStartReview, onStartDemo, initialClear
         <section style={{ border: "1px solid #e9e2d6", borderRadius: 22, padding: "30px 32px", background: "#fff", boxShadow: "var(--shadow)" }}>
           <span className="eyebrow purple"><Icon name="target" size={16} /> CHỌN PHẦN HỌC</span>
           <h1 style={{ margin: "10px 0 6px", fontSize: 25, letterSpacing: "-.6px" }}>Hôm nay bạn muốn học gì?</h1>
-          <p style={{ margin: "0 0 18px", color: "#817a8b", fontSize: 12 }}>Chọn một trong ba phần bên dưới để bắt đầu.</p>
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
             <button style={choiceCard(journeyLocked)} onClick={() => { if (!journeyLocked) setMode("journey"); }}>
               <span style={{ fontSize: 30 }}>🐸</span>
               <strong style={{ fontSize: 15 }}>Hành trình ếch xanh {journeyLocked && "🔒"}</strong>
-              <small style={{ color: "#918a99", fontSize: 11, lineHeight: 1.5 }}>{journeyLocked ? "Đang khóa — cần đạt 50/100 chỉ số thông minh để mở lại." : "Chinh phục dòng sông, mỗi bài 10 câu ngẫu nhiên do AI."}</small>
             </button>
             <button style={choiceCard()} onClick={() => setMode("review")}>
               <span style={{ fontSize: 30 }}>📚</span>
               <strong style={{ fontSize: 15 }}>Ôn tập bài</strong>
-              <small style={{ color: "#918a99", fontSize: 11, lineHeight: 1.5 }}>Ôn lại kiến thức để củng cố và tăng chỉ số thông minh.</small>
             </button>
             <button style={choiceCard()} onClick={onStartDemo}>
               <span style={{ fontSize: 30 }}>🎮</span>
               <strong style={{ fontSize: 15 }}>Luyện tập tự do</strong>
-              <small style={{ color: "#918a99", fontSize: 11, lineHeight: 1.5 }}>20 câu với đủ dạng trả lời — làm thử thoải mái, không ảnh hưởng hành trình và chỉ số.</small>
             </button>
           </div>
         </section>
@@ -2008,14 +2094,790 @@ function AchievementsView({ dashboard }: { dashboard: DashboardData }) {
   );
 }
 
-function AdminDashboard() {
+function SkillBar({ label, value }: { label: string; value: number }) {
+  return <div><span><strong>{label}</strong><b>{value}%</b></span><i><b style={{ width: `${value}%` }}/></i></div>;
+}
+
+const adminUsers = [
+  { name: "Nguyễn Minh Anh", role: "Học sinh", status: "Hoạt động", lastLogin: "2 giờ trước", avatar: "MA" },
+  { name: "Cô Nguyễn Thuỷ", role: "Giáo viên", status: "Đang trực", lastLogin: "8 phút trước", avatar: "NT" },
+  { name: "Phạm Bảo Ngọc", role: "Học sinh", status: "Đang học", lastLogin: "14 phút trước", avatar: "BN" },
+  { name: "Lê Hoàng Nam", role: "Học sinh", status: "Không hoạt động", lastLogin: "2 ngày trước", avatar: "HN" },
+  { name: "Trần Gia Hân", role: "Giáo viên", status: "Hoạt động", lastLogin: "1 giờ trước", avatar: "GH" },
+];
+
+function AdminDashboard({ activeView }: { activeView: AdminView }) {
+  if (activeView === "users") return <AdminUsersView />;
+  if (activeView === "content") return <AdminContentView />;
+  if (activeView === "data") return <AdminDataView />;
+  if (activeView === "config") return <AdminConfigView />;
+
   return (
     <div className="view-stack">
       <section className="page-intro admin-intro"><div><span className="eyebrow purple"><Icon name="shield" size={16}/> SMART LOTUS ADMIN</span><h1>Tổng quan hệ thống</h1><p>Dữ liệu cập nhật theo thời gian thực từ hệ thống học tập.</p></div><span className="system-online"><i/> Hệ thống ổn định</span></section>
       <section className="stat-grid admin-stats">{adminMetrics.map((metric, index) => <StatCard key={metric.label} icon={(["users", "school", "book", "chart"] as IconName[])[index]} tone={metric.tone} value={metric.value} label={metric.label} change={metric.change}/>)}</section>
       <div className="admin-grid">
-        <section className="card admin-chart"><div className="card-heading"><div><span className="section-kicker">TƯƠNG TÁC</span><h2>Hoạt động 7 ngày qua</h2></div><button className="period-button">Tuần này <Icon name="chevron" size={15}/></button></div><div className="line-chart"><div className="grid-lines"><i/><i/><i/><i/></div><svg viewBox="0 0 700 220" preserveAspectRatio="none" aria-label="Biểu đồ hoạt động"><defs><linearGradient id="area" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#8b5cf6" stopOpacity=".3"/><stop offset="1" stopColor="#8b5cf6" stopOpacity="0"/></linearGradient></defs><path d="M0 180 C80 170 90 110 170 120 S270 80 340 105 S440 38 510 70 S620 45 700 25 V220 H0Z" fill="url(#area)"/><path d="M0 180 C80 170 90 110 170 120 S270 80 340 105 S440 38 510 70 S620 45 700 25" fill="none" stroke="#8b5cf6" strokeWidth="5" strokeLinecap="round"/><g fill="#fff" stroke="#8b5cf6" strokeWidth="4"><circle cx="0" cy="180" r="6"/><circle cx="170" cy="120" r="6"/><circle cx="340" cy="105" r="6"/><circle cx="510" cy="70" r="6"/><circle cx="700" cy="25" r="6"/></g></svg><div className="chart-days">{["T2","T3","T4","T5","T6","T7","CN"].map(day=><span key={day}>{day}</span>)}</div></div></section>
+        <section className="card admin-chart"><div className="card-heading"><div><span className="section-kicker">TƯƠNG TÁC</span><h2>Hoạt động 7 ngày qua</h2></div><button className="period-button">Tuần này <Icon name="chevron" size={15}/></button></div><div className="line-chart"><div className="grid-lines"><i/><i/><i/><i/></div><svg viewBox="0 0 700 220" preserveAspectRatio="none" aria-label="Biểu đồ hoạt động"><defs><linearGradient id="area" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#8b5cf6" stopOpacity=".3"/><stop offset="1" stopColor="#8b5cf6" stopOpacity="0"/></linearGradient></defs><path d="M0 180 C80 170 90 110 170 120 S270 80 340 105 S440 38 510 70 S620 45 700 25 V220 H0Z" fill="url(#area)"/><path d="M0 180 C80 170 90 110 170 120 S270 80 340 105 S440 38 510 70 S620 45 700 25" fill="none" stroke="#8b5cf6" strokeWidth="5" strokeLinecap="round"/><g fill="#fff" stroke="#8b5cf6" strokeWidth="4"><circle cx="0" cy="180" r="6"/><circle cx="170" cy="120" r="6"/><circle cx="340" cy="105" r="6"/><circle cx="510" cy="70" r="6"/><circle cx="700" cy="25" r="6"/></g></svg><div className="chart-days">{["T2","T3","T4","T5","T6","T7","CN"].map((day) => <span key={day}>{day}</span>)}</div></div></section>
         <section className="card system-card"><div className="card-heading"><div><span className="section-kicker">TRẠNG THÁI</span><h2>Dịch vụ hệ thống</h2></div></div><div className="service-list"><ServiceStatus icon="database" name="PostgreSQL" detail="Kết nối bình thường"/><ServiceStatus icon="shield" name="Xác thực" detail="Hoạt động ổn định"/><ServiceStatus icon="wand" name="AI sinh câu hỏi" detail="Sẵn sàng tích hợp" standby/><ServiceStatus icon="book" name="Kho nội dung" detail="40 bài đã xuất bản"/></div></section>
+      </div>
+    </div>
+  );
+}
+
+function AdminUsersView() {
+  const [accountForm, setAccountForm] = useState({
+    name: "",
+    email: "",
+    password: "",
+    role: "Quản trị viên",
+  });
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [accountMessage, setAccountMessage] = useState("");
+  const [accountError, setAccountError] = useState("");
+  const [addUserOpen, setAddUserOpen] = useState(false);
+  const [addUserForm, setAddUserForm] = useState({
+    name: "",
+    email: "",
+    password: "",
+    role: "Học sinh",
+  });
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [createUserMessage, setCreateUserMessage] = useState("");
+  const [createUserError, setCreateUserError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    async function fetchAccountProfile() {
+      const { data: { user }, error } = await supabase.auth.getUser();
+      if (!active) return;
+
+      if (error || !user) {
+        setAccountMessage("Không thể tải thông tin tài khoản từ Supabase.");
+        setAccountError("Vui lòng đăng nhập lại để đồng bộ dữ liệu.");
+        return;
+      }
+
+      const fetchedRole = user.user_metadata?.role === "teacher" ? "Giáo viên" : user.user_metadata?.role === "student" ? "Học sinh" : "Quản trị viên";
+      const fetchedName = typeof user.user_metadata?.displayName === "string" && user.user_metadata.displayName.trim() ? user.user_metadata.displayName.trim() : user.email?.split("@")[0] ?? "Smart Lotus Admin";
+
+      setAccountForm({
+        name: fetchedName,
+        email: user.email ?? "",
+        password: "",
+        role: fetchedRole,
+      });
+    }
+
+    void fetchAccountProfile();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const updateAccountField = (field: "name" | "email" | "password" | "role", value: string) => {
+    setAccountForm((current) => ({ ...current, [field]: value }));
+    setAccountError("");
+    setAccountMessage("");
+  };
+
+  const saveAccountProfile = async () => {
+    const trimmedName = accountForm.name.trim();
+    const trimmedEmail = accountForm.email.trim().toLowerCase();
+
+    if (!trimmedName) {
+      setAccountError("Tên tài khoản không được để trống.");
+      return;
+    }
+
+    if (!trimmedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setAccountError("Email không hợp lệ.");
+      return;
+    }
+
+    try {
+      setSavingAccount(true);
+      setAccountError("");
+      setAccountMessage("");
+
+      const roleValue = accountForm.role === "Giáo viên" ? "teacher" : accountForm.role === "Học sinh" ? "student" : "admin";
+      const { error } = await supabase.auth.updateUser({
+        email: trimmedEmail,
+        password: accountForm.password.trim() ? accountForm.password : undefined,
+        data: {
+          displayName: trimmedName,
+          firstName: trimmedName.split(/\s+/).pop() ?? trimmedName,
+          role: roleValue,
+        },
+      });
+
+      if (error) throw error;
+
+      const adminTableUpdate = await supabase.from("users").upsert({
+        email: trimmedEmail,
+        display_name: trimmedName,
+        role: roleValue,
+      }, { onConflict: "email" });
+
+      if (adminTableUpdate.error) {
+        console.warn("Supabase users table sync failed:", adminTableUpdate.error.message);
+      }
+
+      setAccountMessage("Tài khoản đã được đồng bộ lên Supabase.");
+      setAccountForm((current) => ({ ...current, password: "" }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể cập nhật tài khoản.";
+      setAccountError(message);
+    } finally {
+      setSavingAccount(false);
+    }
+  };
+
+  const updateNewUserField = (field: "name" | "email" | "password" | "role", value: string) => {
+    setAddUserForm((current) => ({ ...current, [field]: value }));
+    setCreateUserError("");
+    setCreateUserMessage("");
+  };
+
+  const createUserAccount = async () => {
+    const trimmedName = addUserForm.name.trim();
+    const trimmedEmail = addUserForm.email.trim().toLowerCase();
+    const trimmedPassword = addUserForm.password.trim();
+
+    if (!trimmedName) {
+      setCreateUserError("Vui lòng nhập tên người dùng.");
+      return;
+    }
+
+    if (!trimmedEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+      setCreateUserError("Email không hợp lệ.");
+      return;
+    }
+
+    if (!trimmedPassword || trimmedPassword.length < 6) {
+      setCreateUserError("Mật khẩu phải có ít nhất 6 ký tự.");
+      return;
+    }
+
+    try {
+      setCreatingUser(true);
+      setCreateUserError("");
+      setCreateUserMessage("");
+
+      const nextRole = addUserForm.role === "Giáo viên" ? "teacher" : addUserForm.role === "Quản trị viên" ? "admin" : "student";
+      const { error: signUpError } = await supabase.auth.signUp({
+        email: trimmedEmail,
+        password: trimmedPassword,
+        options: {
+          data: {
+            displayName: trimmedName,
+            firstName: trimmedName.split(/\s+/).pop() ?? trimmedName,
+            role: nextRole,
+          },
+        },
+      });
+
+      if (signUpError) throw signUpError;
+
+      const { error: profileError } = await supabase.from("users").upsert({
+        email: trimmedEmail,
+        display_name: trimmedName,
+        role: nextRole,
+      }, { onConflict: "email" });
+
+      if (profileError) {
+        console.warn("User table sync warning:", profileError.message);
+      }
+
+      setCreateUserMessage("Tạo người dùng mới thành công. Hãy kiểm tra email để xác nhận tài khoản.");
+      setAddUserForm({ name: "", email: "", password: "", role: "Học sinh" });
+      setAddUserOpen(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể tạo người dùng mới.";
+      setCreateUserError(message);
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+
+  return (
+    <div className="view-stack">
+      <section className="page-intro admin-intro">
+        <div>
+          <span className="eyebrow purple"><Icon name="users" size={16} /> QUẢN LÝ NGƯỜI DÙNG</span>
+          <h1>Người dùng</h1>
+          <p>Theo dõi, kiểm soát và phát triển cộng đồng học tập của Smart Lotus.</p>
+        </div>
+        <button className="primary-button" onClick={() => setAddUserOpen(true)}>
+          <Icon name="plus" size={16} /> Thêm người dùng
+        </button>
+      </section>
+
+      {addUserOpen && (
+        <div className="add-user-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setAddUserOpen(false); }}>
+          <section className="add-user-dialog" role="dialog" aria-modal="true" aria-labelledby="add-user-title">
+            <div className="profile-editor-heading">
+              <div><span className="section-kicker">THÊM NGƯỜI DÙNG</span><h2 id="add-user-title">Tạo tài khoản mới</h2></div>
+              <button type="button" className="icon-button" onClick={() => setAddUserOpen(false)} aria-label="Đóng"><Icon name="close" size={17} /></button>
+            </div>
+
+            <form className="account-form" onSubmit={(event) => { event.preventDefault(); void createUserAccount(); }}>
+            <label>
+              <span>Họ tên</span>
+              <input type="text" value={addUserForm.name} onChange={(event) => updateNewUserField("name", event.target.value)} />
+            </label>
+
+            <label>
+              <span>Email</span>
+              <input type="email" value={addUserForm.email} onChange={(event) => updateNewUserField("email", event.target.value)} />
+            </label>
+
+            <label>
+              <span>Mật khẩu</span>
+              <input type="password" value={addUserForm.password} onChange={(event) => updateNewUserField("password", event.target.value)} />
+            </label>
+
+            <label>
+              <span>Vai trò</span>
+              <select value={addUserForm.role} onChange={(event) => updateNewUserField("role", event.target.value)}>
+                <option>Học sinh</option>
+                <option>Giáo viên</option>
+                <option>Quản trị viên</option>
+              </select>
+            </label>
+
+            <div className="add-user-actions">
+              <button type="button" className="secondary-button" onClick={() => setAddUserOpen(false)}>Hủy</button>
+              <button type="submit" className="primary-button account-save-button" disabled={creatingUser}>
+                <Icon name="check" size={16} /> {creatingUser ? "Đang tạo..." : "Tạo người dùng"}
+              </button>
+            </div>
+
+            {createUserError && <p className="auth-error" role="alert"><Icon name="close" size={14} />{createUserError}</p>}
+            {createUserMessage && <p className="auth-notice" role="status"><Icon name="check" size={14} />{createUserMessage}</p>}
+            </form>
+          </section>
+        </div>
+      )}
+      {!addUserOpen && createUserMessage && <p className="auth-notice" role="status"><Icon name="check" size={14} />{createUserMessage}</p>}
+
+      <section className="stat-grid admin-stats">
+        <StatCard icon="users" tone="purple" value="1.248" label="Tổng người dùng" change="+12% so với tháng trước" />
+        <StatCard icon="school" tone="green" value="318" label="Giáo viên" change="+19 giảng viên mới" />
+        <StatCard icon="book" tone="orange" value="930" label="Học sinh" change="+128 học sinh mới" />
+        <StatCard icon="target" tone="pink" value="96%" label="Tỷ lệ hoạt động" change="Trong 7 ngày qua" />
+      </section>
+
+      <div className="admin-grid user-grid">
+        <section className="card user-table-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">TÀI KHOẢN</span><h2>Danh sách người dùng</h2></div>
+            <div className="search-box"><Icon name="search" size={17} /><span>Tìm kiếm...</span></div>
+          </div>
+
+          <div className="user-table">
+            <div className="table-head user-head">
+              <span>Người dùng</span>
+              <span>Vai trò</span>
+              <span>Trạng thái</span>
+              <span>Hoạt động</span>
+            </div>
+            {adminUsers.map((user) => (
+              <div className="table-row user-row" key={user.name}>
+                <span className="student-name">
+                  <i className="student-avatar tone-0">{user.avatar}</i>
+                  <strong>{user.name}</strong>
+                </span>
+                <span className="role-pill">{user.role}</span>
+                <span className={`status-pill ${user.status === "Không hoạt động" ? "idle" : user.status === "Đang trực" ? "live" : "online"}`}>{user.status}</span>
+                <span className="activity-meta">{user.lastLogin}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="card user-summary-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">PHÂN TÍCH</span><h2>Phân bổ quyền</h2></div>
+          </div>
+
+          <div className="role-breakdown">
+            <div className="role-line"><span><strong>Học sinh</strong><b>73%</b></span><i><b style={{ width: "73%" }} /></i></div>
+            <div className="role-line"><span><strong>Giáo viên</strong><b>21%</b></span><i><b style={{ width: "21%" }} /></i></div>
+            <div className="role-line"><span><strong>Quản trị</strong><b>6%</b></span><i><b style={{ width: "6%" }} /></i></div>
+          </div>
+
+          <div className="mini-card-list">
+            <div className="mini-card">
+              <span className="mini-card-icon purple"><Icon name="medal" size={16} /></span>
+              <div><strong>Học sinh mới</strong><small>128 người</small></div>
+            </div>
+            <div className="mini-card">
+              <span className="mini-card-icon green"><Icon name="check" size={16} /></span>
+              <div><strong>Đang online</strong><small>542 người</small></div>
+            </div>
+            <div className="mini-card">
+              <span className="mini-card-icon orange"><Icon name="clock" size={16} /></span>
+              <div><strong>Yêu cầu hỗ trợ</strong><small>18 hôm nay</small></div>
+            </div>
+          </div>
+        </section>
+
+        <section className="card account-manager-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">QUẢN LÝ TÀI KHOẢN</span><h2>Thông tin đăng nhập</h2></div>
+          </div>
+
+          <div className="account-form">
+            <label>
+              <span>Tên tài khoản</span>
+              <input
+                type="text"
+                value={accountForm.name}
+                onChange={(event) => updateAccountField("name", event.target.value)}
+              />
+            </label>
+
+            <label>
+              <span>Email</span>
+              <input
+                type="email"
+                value={accountForm.email}
+                onChange={(event) => updateAccountField("email", event.target.value)}
+              />
+            </label>
+
+            <label>
+              <span>Mật khẩu mới</span>
+              <input
+                type="password"
+                value={accountForm.password}
+                placeholder="Nhập mật khẩu mới"
+                onChange={(event) => updateAccountField("password", event.target.value)}
+              />
+            </label>
+
+            <label>
+              <span>Vai trò</span>
+              <select value={accountForm.role} onChange={(event) => updateAccountField("role", event.target.value)}>
+                <option>Quản trị viên</option>
+                <option>Giáo viên</option>
+                <option>Học sinh</option>
+              </select>
+            </label>
+
+            <button type="button" className="primary-button account-save-button" onClick={() => void saveAccountProfile()} disabled={savingAccount}>
+              <Icon name="check" size={16} /> {savingAccount ? "Đang cập nhật..." : "Cập nhật tài khoản"}
+            </button>
+
+            {accountError && <p className="auth-error" role="alert"><Icon name="close" size={14} />{accountError}</p>}
+            {accountMessage && <p className="auth-notice" role="status"><Icon name="check" size={14} />{accountMessage}</p>}
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function AdminContentView() {
+  const [createContentOpen, setCreateContentOpen] = useState(false);
+  const [contentDraft, setContentDraft] = useState({
+    title: "",
+    type: "Bài học",
+    level: "Level 1",
+    status: "Đang biên tập",
+    description: "",
+  });
+  const [contentItems, setContentItems] = useState([
+    { title: "Phép cộng trong phạm vi 10", type: "Bài học", status: "Đã xuất bản", level: "Level 3", updated: "2 giờ trước" },
+    { title: "So sánh số lớn hơn - bé hơn", type: "Bài học", status: "Đang biên tập", level: "Level 2", updated: "Hôm qua" },
+    { title: "Bài toán có lời văn", type: "Trò chơi", status: "Kiểm duyệt", level: "Level 4", updated: "3 ngày trước" },
+    { title: "Lộ trình ôn tập tuần 6", type: "Lộ trình", status: "Đã xuất bản", level: "Tổng hợp", updated: "5 ngày trước" },
+  ]);
+  const [contentError, setContentError] = useState("");
+  const [contentSuccess, setContentSuccess] = useState("");
+
+  const updateDraft = (field: "title" | "type" | "level" | "status" | "description", value: string) => {
+    setContentDraft((current) => ({ ...current, [field]: value }));
+    setContentError("");
+    setContentSuccess("");
+  };
+
+  const createContent = () => {
+    const title = contentDraft.title.trim();
+    if (!title) {
+      setContentError("Vui lòng nhập tiêu đề nội dung.");
+      return;
+    }
+
+    if (!contentDraft.description.trim()) {
+      setContentError("Vui lòng nhập mô tả nội dung.");
+      return;
+    }
+
+    const newEntry = {
+      title,
+      type: contentDraft.type,
+      status: contentDraft.status,
+      level: contentDraft.level,
+      updated: "Vừa xong",
+    };
+
+    setContentItems((current) => [newEntry, ...current]);
+    setContentDraft({ title: "", type: "Bài học", level: "Level 1", status: "Đang biên tập", description: "" });
+    setCreateContentOpen(false);
+    setContentSuccess("Nội dung mới đã được tạo thành công.");
+  };
+
+  return (
+    <div className="view-stack">
+      <section className="page-intro admin-intro">
+        <div>
+          <span className="eyebrow purple"><Icon name="book" size={16} /> QUẢN LÝ NỘI DUNG</span>
+          <h1>Nội dung</h1>
+          <p>Quản lý bài học, lộ trình và tài nguyên học tập của hệ thống.</p>
+        </div>
+        <button className="primary-button" onClick={() => setCreateContentOpen(true)}>
+          <Icon name="plus" size={16} /> Tạo nội dung
+        </button>
+      </section>
+
+      {createContentOpen && (
+        <div className="add-user-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCreateContentOpen(false); }}>
+          <section className="add-user-dialog" role="dialog" aria-modal="true" aria-labelledby="create-content-title">
+            <div className="profile-editor-heading">
+              <div><span className="section-kicker">TẠO NỘI DUNG</span><h2 id="create-content-title">Thêm bài học hoặc khóa học mới</h2></div>
+              <button type="button" className="icon-button" onClick={() => setCreateContentOpen(false)} aria-label="Đóng"><Icon name="close" size={17} /></button>
+            </div>
+
+            <div className="account-form">
+            <label>
+              <span>Tiêu đề</span>
+              <input type="text" value={contentDraft.title} onChange={(event) => updateDraft("title", event.target.value)} />
+            </label>
+
+            <label>
+              <span>Loại nội dung</span>
+              <select value={contentDraft.type} onChange={(event) => updateDraft("type", event.target.value)}>
+                <option>Bài học</option>
+                <option>Trò chơi</option>
+                <option>Lộ trình</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Cấp độ</span>
+              <select value={contentDraft.level} onChange={(event) => updateDraft("level", event.target.value)}>
+                <option>Level 1</option>
+                <option>Level 2</option>
+                <option>Level 3</option>
+                <option>Level 4</option>
+                <option>Tổng hợp</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Trạng thái</span>
+              <select value={contentDraft.status} onChange={(event) => updateDraft("status", event.target.value)}>
+                <option>Đang biên tập</option>
+                <option>Kiểm duyệt</option>
+                <option>Đã xuất bản</option>
+              </select>
+            </label>
+
+            <label>
+              <span>Mô tả</span>
+              <textarea
+                value={contentDraft.description}
+                onChange={(event) => updateDraft("description", event.target.value)}
+                rows={4}
+                style={{ minHeight: 90, resize: "vertical", padding: "10px 11px", border: "1px solid #e5e1e9", borderRadius: 10, fontFamily: "inherit" }}
+              />
+            </label>
+
+            <div className="add-user-actions">
+              <button type="button" className="secondary-button" onClick={() => setCreateContentOpen(false)}>Hủy</button>
+              <button type="button" className="primary-button account-save-button" onClick={createContent}>
+                <Icon name="check" size={16} /> Lưu nội dung
+              </button>
+            </div>
+
+            {contentError && <p className="auth-error" role="alert"><Icon name="close" size={14} />{contentError}</p>}
+            {contentSuccess && <p className="auth-notice" role="status"><Icon name="check" size={14} />{contentSuccess}</p>}
+            </div>
+          </section>
+        </div>
+      )}
+      {!createContentOpen && contentSuccess && <p className="auth-notice" role="status"><Icon name="check" size={14} />{contentSuccess}</p>}
+
+      <section className="stat-grid admin-stats">
+        <StatCard icon="book" tone="purple" value="40" label="Bài học" change="+3 mới" />
+        <StatCard icon="school" tone="green" value="12" label="Lộ trình" change="+2 khóa mới" />
+        <StatCard icon="target" tone="orange" value="18" label="Trò chơi" change="Đang hoạt động" />
+        <StatCard icon="chart" tone="pink" value="86%" label="Độ phủ nội dung" change="Cập nhật tuần này" />
+      </section>
+
+      <div className="admin-grid content-grid">
+        <section className="card content-table-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">KHÔNG GIAN</span><h2>Danh sách nội dung</h2></div>
+            <div className="search-box"><Icon name="search" size={17} /><span>Tìm nội dung...</span></div>
+          </div>
+
+          <div className="content-list">
+            {contentItems.map((item) => (
+              <div className="content-list-item" key={`${item.title}-${item.updated}`}>
+                <div className="content-main">
+                  <span className="content-badge">{item.type}</span>
+                  <div>
+                    <strong>{item.title}</strong>
+                    <small>{item.level} · Cập nhật {item.updated}</small>
+                  </div>
+                </div>
+
+                <span className={`content-status ${item.status === "Đã xuất bản" ? "published" : item.status === "Đang biên tập" ? "draft" : "review"}`}>
+                  {item.status}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="card content-summary-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">PHÂN TÍCH</span><h2>Phân bố nội dung</h2></div>
+          </div>
+
+          <div className="role-breakdown">
+            <div className="role-line"><span><strong>Toán tư duy</strong><b>42%</b></span><i><b style={{ width: "42%" }} /></i></div>
+            <div className="role-line"><span><strong>Phép tính</strong><b>31%</b></span><i><b style={{ width: "31%" }} /></i></div>
+            <div className="role-line"><span><strong>Toán có lời văn</strong><b>27%</b></span><i><b style={{ width: "27%" }} /></i></div>
+          </div>
+
+          <div className="mini-card-list">
+            <div className="mini-card">
+              <span className="mini-card-icon purple"><Icon name="sparkles" size={16} /></span>
+              <div><strong>Chủ đề hot</strong><small>Phép cộng số 1-10</small></div>
+            </div>
+            <div className="mini-card">
+              <span className="mini-card-icon green"><Icon name="check" size={16} /></span>
+              <div><strong>Đã duyệt</strong><small>28 bài</small></div>
+            </div>
+            <div className="mini-card">
+              <span className="mini-card-icon orange"><Icon name="clock" size={16} /></span>
+              <div><strong>Chờ xử lý</strong><small>6 bài</small></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function AdminDataView() {
+  const dataSources = [
+    { name: "Kết quả học tập", source: "Học sinh · 1,248 người", status: "Đã đồng bộ", freshness: "Cập nhật 5 phút trước" },
+    { name: "Bài kiểm tra AI", source: "Quiz engine · 18 đề", status: "Đang xử lý", freshness: "2 lượt đang chạy" },
+    { name: "Hoạt động lớp học", source: "Giáo viên · 318 tài khoản", status: "Bình thường", freshness: "Cập nhật 12 phút trước" },
+    { name: "Kho nội dung", source: "Bài học · 40 nội dung", status: "Đã đồng bộ", freshness: "Đã khóa dữ liệu hôm nay" },
+  ];
+
+  return (
+    <div className="view-stack">
+      <section className="page-intro admin-intro">
+        <div>
+          <span className="eyebrow purple"><Icon name="database" size={16} /> QUẢN LÝ DỮ LIỆU</span>
+          <h1>Dữ liệu</h1>
+          <p>Giám sát nguồn dữ liệu, đồng bộ và chất lượng thông tin trong hệ thống học tập.</p>
+        </div>
+        <button className="primary-button"><Icon name="plus" size={16} /> Xuất báo cáo</button>
+      </section>
+
+      <section className="stat-grid admin-stats">
+        <StatCard icon="database" tone="purple" value="3.2M" label="Số điểm dữ liệu" change="+8.4% tuần này" />
+        <StatCard icon="chart" tone="green" value="99.2%" label="Tỷ lệ tin cậy" change="Mức ổn định cao" />
+        <StatCard icon="clock" tone="orange" value="8.7s" label="Thời gian xử lý" change="TB mỗi batch" />
+        <StatCard icon="shield" tone="pink" value="14" label="Cảnh báo đang chờ" change="2 cần ưu tiên" />
+      </section>
+
+      <div className="admin-grid data-grid">
+        <section className="card data-table-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">NGUỒN DỮ LIỆU</span><h2>Danh sách đồng bộ</h2></div>
+            <div className="search-box"><Icon name="search" size={17} /><span>Tìm nguồn dữ liệu...</span></div>
+          </div>
+
+          <div className="data-list">
+            {dataSources.map((item) => (
+              <div className="data-list-item" key={item.name}>
+                <div className="data-main">
+                  <span className="data-badge">{item.source.split("·")[0].trim()}</span>
+                  <div>
+                    <strong>{item.name}</strong>
+                    <small>{item.source}</small>
+                  </div>
+                </div>
+
+                <div className="data-meta">
+                  <span className={`data-status ${item.status === "Đã đồng bộ" ? "online" : item.status === "Đang xử lý" ? "processing" : "stable"}`}>
+                    {item.status}
+                  </span>
+                  <small>{item.freshness}</small>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="card data-summary-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">ĐỒNG BỘ</span><h2>Tình trạng hệ thống</h2></div>
+          </div>
+
+          <div className="role-breakdown">
+            <div className="role-line"><span><strong>Đã nhập</strong><b>78%</b></span><i><b style={{ width: "78%" }} /></i></div>
+            <div className="role-line"><span><strong>Đang chạy</strong><b>18%</b></span><i><b style={{ width: "18%" }} /></i></div>
+            <div className="role-line"><span><strong>Chờ xử lý</strong><b>4%</b></span><i><b style={{ width: "4%" }} /></i></div>
+          </div>
+
+          <div className="mini-card-list">
+            <div className="mini-card">
+              <span className="mini-card-icon purple"><Icon name="arrow" size={16} /></span>
+              <div><strong>Đồng bộ gần nhất</strong><small>09:40 sáng</small></div>
+            </div>
+            <div className="mini-card">
+              <span className="mini-card-icon green"><Icon name="check" size={16} /></span>
+              <div><strong>Đã xử lý</strong><small>14.260 bản ghi</small></div>
+            </div>
+            <div className="mini-card">
+              <span className="mini-card-icon orange"><Icon name="bell" size={16} /></span>
+              <div><strong>Cần kiểm tra</strong><small>2 mục quan trọng</small></div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function AdminConfigView() {
+  const settings = [
+    { name: "Email xác thực", detail: "Bắt buộc xác minh trước khi vào lớp", enabled: true },
+    { name: "AI sinh câu hỏi", detail: "Tự động tạo nội dung cho bài học mới", enabled: true },
+    { name: "Gửi thông báo push", detail: "Nhắc nhở bài tập và tiến độ học tập", enabled: false },
+    { name: "Chế độ bảo trì", detail: "Tạm thời khóa đăng nhập hệ thống", enabled: false },
+  ];
+
+  return (
+    <div className="view-stack">
+      <section className="page-intro admin-intro">
+        <div>
+          <span className="eyebrow purple"><Icon name="settings" size={16} /> CÀI ĐẶT HỆ THỐNG</span>
+          <h1>Cấu hình</h1>
+          <p>Quản lý quyền truy cập, bảo mật và trải nghiệm học tập cho toàn bộ hệ thống.</p>
+        </div>
+        <button className="primary-button"><Icon name="check" size={16} /> Lưu thay đổi</button>
+      </section>
+
+      <section className="stat-grid admin-stats">
+        <StatCard icon="settings" tone="purple" value="12" label="Cài đặt đang bật" change="Tất cả hoạt động" />
+        <StatCard icon="shield" tone="green" value="3" label="Mức bảo mật" change="Đã tối ưu" />
+        <StatCard icon="users" tone="orange" value="5" label="Nhóm quyền" change="Tổng hợp mới" />
+        <StatCard icon="chart" tone="pink" value="92%" label="Độ ổn định" change="So với tuần trước" />
+      </section>
+
+      <div className="admin-grid config-grid">
+        <section className="card config-list-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">HỆ THỐNG</span><h2>Cài đặt chung</h2></div>
+          </div>
+
+          <div className="config-list">
+            {settings.map((setting) => (
+              <div className="config-row" key={setting.name}>
+                <div className="config-copy">
+                  <strong>{setting.name}</strong>
+                  <small>{setting.detail}</small>
+                </div>
+                <button type="button" className={`toggle ${setting.enabled ? "on" : ""}`} aria-label={setting.name}>
+                  <span />
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="card config-summary-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">PHÂN QUYỀN</span><h2>Vai trò hệ thống</h2></div>
+          </div>
+
+          <div className="role-breakdown">
+            <div className="role-line"><span><strong>Quản trị viên</strong><b>100%</b></span><i><b style={{ width: "100%" }} /></i></div>
+            <div className="role-line"><span><strong>Giáo viên</strong><b>74%</b></span><i><b style={{ width: "74%" }} /></i></div>
+            <div className="role-line"><span><strong>Học sinh</strong><b>48%</b></span><i><b style={{ width: "48%" }} /></i></div>
+          </div>
+
+          <div className="mini-card-list">
+            <div className="mini-card">
+              <span className="mini-card-icon purple"><Icon name="shield" size={16} /></span>
+              <div><strong>2FA bắt buộc</strong><small>Cho quản trị & giáo viên</small></div>
+            </div>
+            <div className="mini-card">
+              <span className="mini-card-icon green"><Icon name="check" size={16} /></span>
+              <div><strong>Ủy quyền</strong><small>Đã cập nhật hôm nay</small></div>
+            </div>
+            <div className="mini-card">
+              <span className="mini-card-icon orange"><Icon name="bell" size={16} /></span>
+              <div><strong>Nhắc nhở</strong><small>3 cảnh báo đang chờ</small></div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div className="admin-grid config-grid lower-config-grid">
+        <section className="card config-panel-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">TRẢI NGHIỆM</span><h2>Giao diện & học tập</h2></div>
+          </div>
+
+          <div className="config-stack">
+            <div className="config-stack-item">
+              <span>Chủ đề mặc định</span>
+              <strong>Smart Lotus Violet</strong>
+            </div>
+            <div className="config-stack-item">
+              <span>Độ tương tác</span>
+              <strong>Đang ở mức cao</strong>
+            </div>
+            <div className="config-stack-item">
+              <span>Nhắc nhở</span>
+              <strong>2 lần/ngày</strong>
+            </div>
+          </div>
+        </section>
+
+        <section className="card config-panel-card">
+          <div className="card-heading">
+            <div><span className="section-kicker">PHIÊN BẢN</span><h2>Thông tin triển khai</h2></div>
+          </div>
+
+          <div className="config-stack">
+            <div className="config-stack-item">
+              <span>Phiên bản app</span>
+              <strong>1.0.8</strong>
+            </div>
+            <div className="config-stack-item">
+              <span>API trạng thái</span>
+              <strong>Ổn định</strong>
+            </div>
+            <div className="config-stack-item">
+              <span>Thời gian backup</span>
+              <strong>01:00 hàng ngày</strong>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );

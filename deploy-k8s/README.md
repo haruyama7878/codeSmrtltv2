@@ -25,16 +25,18 @@ Xem `d:\Games\rrr\.env.local` / `.env.production` và manifest `~/deploy/*.yaml`
 - Đổi secret = sửa manifest + `.env`, restart pod, **tạo lại ANON_KEY/SERVICE_ROLE_KEY** bằng `generate-secrets.js`.
 
 ## Local dev (máy Windows)
-1. Mở tunnel: `powershell -ExecutionPolicy Bypass -File deploy-k8s\tunnel.ps1`
-   (mở localhost:30432 → Postgres, localhost:30800 → Auth; cần SSH key đã cài lên server).
-2. Cài và khởi chạy Ollama, bảo đảm đã có model `minicpm-v:latest` (`ollama pull minicpm-v:latest` nếu chưa có).
-3. `npm run dev` → `http://localhost:3000` (dùng `.env.local`). Ollama mặc định được gọi tại `http://localhost:11434`; có thể ghi đè bằng `OLLAMA_BASE_URL` và `OLLAMA_MODEL`.
-4. Nếu sửa schema: `npx drizzle-kit push`.
-5. Nạp/cập nhật danh mục 40 bài học từ curriculum: `npm run db:seed`.
+1. Cấu hình `.env.local` theo mẫu `.env.example`: dùng Project URL và Publishable key của Supabase Cloud cho `NEXT_PUBLIC_SUPABASE_URL`, `SUPABASE_INTERNAL_URL` và `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
+2. Tải chứng chỉ CA database chính thức từ [Supabase](https://supabase-downloads.s3-ap-southeast-1.amazonaws.com/prod/ssl/prod-ca-2021.crt) hoặc Settings → Database → SSL Configuration trong project Supabase, lưu vào `D:\Games\rrr\supabase-root.crt`. Lấy connection string **Session pooler** trong Project → Connect, lưu vào `SUPABASE_DATABASE_URL`; dùng `sslmode=verify-full` và `sslrootcert` trỏ tới chứng chỉ đã tải (URI-encode đường dẫn Windows). Giữ `DATABASE_URL` trỏ tới PostgreSQL cũ cho tới khi hoàn tất chuyển dữ liệu. Không tắt kiểm tra chứng chỉ, commit hoặc chia sẻ các connection string có mật khẩu.
+3. Tạo các bảng của ứng dụng trong Supabase Cloud bằng `npm run db:push`.
+4. Xem trước dữ liệu cũ bằng `npm run db:migrate:legacy`; sau khi xác nhận project đích và schema, chạy `npm run db:migrate:legacy -- --execute` để sao chép hồ sơ, tiến độ, bài học, lớp và bài làm. Các bảng ứng dụng ở database đích phải còn trống; chạy lệnh seed curriculum sau khi chuyển dữ liệu.
+5. Trong Supabase Authentication → URL Configuration, đặt Site URL `http://localhost:3000` và cho phép callback `http://localhost:3000/**`. Người dùng cần đăng ký lại trên Cloud bằng email cũ để hồ sơ và tiến độ đã chuyển được liên kết; tài khoản của Supabase tự host cũ không được tự chuyển.
+6. Khởi chạy app: `npm run dev` → `http://localhost:3000`.
+7. Cài và khởi chạy Ollama, bảo đảm đã có model `minicpm-v:latest` (`ollama pull minicpm-v:latest` nếu chưa có). Ollama mặc định được gọi tại `http://localhost:11434`; có thể ghi đè bằng `OLLAMA_BASE_URL` và `OLLAMA_MODEL`.
+8. Áp dụng schema bằng `npm run db:push`, sau đó nạp/cập nhật danh mục 40 bài học: `npm run db:seed`. Khi có cả hai biến, lệnh seed dùng `SUPABASE_DATABASE_URL` (cùng database với app) thay vì database legacy trong `DATABASE_URL`. Lượt làm bài mới có khóa ngoại tới bài học đã xuất bản; lệnh seed cũng nối các lượt cũ có slug khớp duy nhất.
 
 Khi chạy production, tiến trình Next.js cũng cần truy cập được Ollama. Thiết lập `OLLAMA_BASE_URL` trỏ đến Ollama từ máy chạy Next.js và `OLLAMA_MODEL` nếu dùng model khác.
 
-Khi cập nhật schema có bảng `assignment_projects` để lưu bộ dự án riêng của giáo viên, áp dụng schema vào PostgreSQL bằng `npx drizzle-kit push` trước khi dùng các API bộ dự án.
+Khi cập nhật schema, áp dụng schema lên database được cấu hình bằng `npm run db:push` trước khi dùng các API liên quan.
 
 ### Thư viện ảnh và tách nền
 - Thư viện ảnh bài tập được đọc từ `library/canh_vat` và `library/do_vat`; giữ hai thư mục này trong bản triển khai.

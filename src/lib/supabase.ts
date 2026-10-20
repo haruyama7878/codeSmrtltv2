@@ -1,8 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 
-// Client-side: dung chinh origin cua trinh duyet (auth di qua rewrite proxy /auth/v1 cua Next.js)
-// => link hoat dong o bat ky dau: localhost (tunnel), LAN, hay public IP khi mo port.
-// Server-side (SSR/build): dung URL noi bo.
+// Client-side requests use the same-origin rewrite; server-side requests use the configured Supabase URL.
 const supabaseUrl =
   typeof window !== "undefined"
     ? window.location.origin

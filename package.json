@@ -7,7 +7,9 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "db:seed": "node --experimental-strip-types scripts/seed-curriculum.mjs"
+    "db:seed": "node --experimental-strip-types scripts/seed-curriculum.mjs",
+    "db:push": "drizzle-kit push",
+    "db:migrate:legacy": "node scripts/migrate-legacy-data.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.12.6",

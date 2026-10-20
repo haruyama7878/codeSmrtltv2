@@ -20,9 +20,14 @@ export default function Classroom() {
   useEffect(() => {
     let active = true;
     void smartLotusApi.getClassrooms().then(({ classrooms: items }) => {
-      if (active) setClassrooms(items);
+      if (!active) return;
+      setClassrooms(items);
+      setError("");
     }).catch((loadError: unknown) => {
-      if (active) setError(loadError instanceof Error ? loadError.message : "Không thể tải danh sách lớp học");
+      if (!active) return;
+      console.error("Load classrooms error", loadError);
+      setClassrooms([]);
+      setError("");
     }).finally(() => {
       if (active) setLoading(false);
     });

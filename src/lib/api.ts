@@ -4,6 +4,16 @@ import type { Classroom, Student } from "@/lib/student-data";
 
 export type Role = "student" | "teacher" | "admin";
 
+export type LessonRecord = {
+  id: number;
+  slug: string;
+  curriculumLevel: number;
+  title: string;
+  topic: string;
+  competency: string;
+  questionCount: number;
+};
+
 export type DashboardData = {
   user: {
     id: number;
@@ -103,6 +113,9 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export const smartLotusApi = {
+  getLessons() {
+    return request<{ lessons: LessonRecord[] }>("/api/lessons");
+  },
   getDashboard(role: Role = "student") {
     return request<DashboardData>(`/api/dashboard?role=${role}`);
   },
